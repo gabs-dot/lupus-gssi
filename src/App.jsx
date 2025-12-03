@@ -509,23 +509,19 @@ function Lobby({
         <section className="players">
           <h3>Players in the lobby</h3>
           <ul>
-            {game.players.map((p) => (
-              <li key={p.id} className="player-item">
-                <span>
-                  {p.name}
-                  {p.id === currentPlayerId ? " (you)" : ""}
-                </span>
-                <div style={{ display: "flex", gap: "0.4rem" }}>
-                  {p.isHost && <span className="badge">Host</span>}
-                  {p.role && (
-                    <span className="badge" style={{ opacity: 0.7 }}>
-                      {p.role}
-                    </span>
-                  )}
-                </div>
-              </li>
-            ))}
-          </ul>
+  {game.players.map((p) => (
+    <li key={p.id} className="player-item">
+      <span>
+        {p.name}
+        {p.id === currentPlayerId ? " (you)" : ""}
+      </span>
+      <div style={{ display: "flex", gap: "0.4rem" }}>
+        {p.isHost && <span className="badge">Host</span>}
+        {/* Roles are secret: we do NOT show p.role here */}
+      </div>
+    </li>
+  ))}
+</ul>
         </section>
 
         {me && me.role && (
