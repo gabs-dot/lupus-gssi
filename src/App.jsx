@@ -75,12 +75,98 @@ async function fetchPlayersForGame(gameId) {
   }));
 }
 
+// Helper to load a single game by id
+async function fetchGameById(gameId) {
+  const { data, error } = await supabase
+    .from("games")
+    .select("*")
+    .eq("id", gameId)
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return {
+    id: data.id,
+    code: data.code,
+    hostName: data.host_name,
+    status: data.status,
+    phase: data.phase,
+    dayNumber: data.day_number,
+  };
+}
+
+// Helper: load full game (game + players)
+async function hydrateGame(gameId) {
+  const game = await fetchGameById(gameId);
+  const players = await fetchPlayersForGame(gameId);
+  return { ...game, players };
+}
+
+// Insert/update a night action for a player (Mafia/Doctor)
+async function submitNightAction({
+  gameId,
+  playerId,
+  dayNumber,
+  actionType,
+  targetPlayerId,
+}) {
+  // Remove previous action of this type for this player/night
+  await supabase
+    .from("actions")
+    .delete()
+    .eq("game_id", gameId)
+    .eq("player_id", playerId)
+    .eq("day_number", dayNumber)
+    .eq("phase", "night")
+    .eq("action_type", actionType);
+
+  const { error } = await supabase.from("actions").insert({
+    game_id: gameId,
+    player_id: playerId,
+    day_number: dayNumber,
+    phase: "night",
+    action_type: actionType,
+    target_player_id: targetPlayerId,
+  });
+
+  if (error) {
+    throw error;
+  }
+}
+// Insert/update a day vote action
+async function submitDayVote({ gameId, playerId, dayNumber, targetPlayerId }) {
+  // Remove previous vote from this player for this day
+  await supabase
+    .from("actions")
+    .delete()
+    .eq("game_id", gameId)
+    .eq("player_id", playerId)
+    .eq("day_number", dayNumber)
+    .eq("phase", "day")
+    .eq("action_type", "DAY_VOTE");
+
+  const { error } = await supabase.from("actions").insert({
+    game_id: gameId,
+    player_id: playerId,
+    day_number: dayNumber,
+    phase: "day",
+    action_type: "DAY_VOTE",
+    target_player_id: targetPlayerId,
+  });
+
+  if (error) {
+    throw error;
+  }
+}
 function App() {
   const [playerName, setPlayerName] = useState("");
-  const [currentGame, setCurrentGame] = useState(null); // { id, code, hostName, players: [] }
+  const [currentGame, setCurrentGame] = useState(null); // { id, code, hostName, status, phase, dayNumber, players: [] }
   const [currentPlayerId, setCurrentPlayerId] = useState(null);
   const [showJoin, setShowJoin] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
+  const [resolvingDay, setResolvingDay] = useState(false);
 
   // 1) First screen: ask for the display name
   if (!playerName) {
@@ -102,7 +188,7 @@ function App() {
     );
   }
 
-  // 2) If a game exists → show the Lobby
+  // 2) If a game exists → show the Lobby / Night UI
   if (currentGame && currentPlayerId) {
     return (
       <Lobby
@@ -119,6 +205,16 @@ function App() {
               ? {
                   ...prev,
                   players,
+                }
+              : prev
+          )
+        }
+        onGameUpdated={(partial) =>
+          setCurrentGame((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  ...partial,
                 }
               : prev
           )
@@ -191,17 +287,10 @@ function App() {
                 return;
               }
 
-              // 3) Load all players for the lobby (currently just the host)
-              const players = await fetchPlayersForGame(game.id);
+              // 3) Load full game
+              const hydrated = await hydrateGame(game.id);
 
-              const newGame = {
-                id: game.id,
-                code: game.code,
-                hostName: game.host_name,
-                players,
-              };
-
-              setCurrentGame(newGame);
+              setCurrentGame(hydrated);
               setCurrentPlayerId(player.id);
             } catch (err) {
               console.error(err);
@@ -333,17 +422,10 @@ function JoinGameForm({ playerName, onJoinedGame }) {
         return;
       }
 
-      // 3) Load all players
-      const players = await fetchPlayersForGame(game.id);
+      // 3) Load full game
+      const hydrated = await hydrateGame(game.id);
 
-      const joinedGame = {
-        id: game.id,
-        code: game.code,
-        hostName: game.host_name,
-        players,
-      };
-
-      onJoinedGame(joinedGame, player.id);
+      onJoinedGame(hydrated, player.id);
     } catch (err) {
       console.error(err);
       setError("Unexpected error while joining the game.");
@@ -371,28 +453,60 @@ function JoinGameForm({ playerName, onJoinedGame }) {
   );
 }
 
-// Lobby screen (after “Create a new game” or join)
+// Lobby + Night UI
 function Lobby({
   game,
   playerName,
   currentPlayerId,
   onLeaveGame,
   onPlayersUpdated,
+  onGameUpdated,
 }) {
   const isHost = game.hostName === playerName;
   const [isStarting, setIsStarting] = useState(false);
+  const [resolvingNight, setResolvingNight] = useState(false);
+  const [detectiveResult, setDetectiveResult] = useState("");
 
   const me = game.players.find((p) => p.id === currentPlayerId) || null;
 
+    const isNight =
+    game.phase === "night_1" ||
+    (game.phase && game.phase.toLowerCase().startsWith("night"));
+
+  const isDay =
+    !isNight &&
+    game.phase &&
+    game.phase.toLowerCase().startsWith("day");
+
+  const alivePlayers = game.players.filter((p) => p.alive !== false);
+  const phaseLabel = (() => {
+    if (game.phase === "lobby") return "Lobby";
+    if (isNight) return `Night ${game.dayNumber || 1}`;
+    if (isDay) return `Day ${game.dayNumber || 1}`;
+    return game.phase || "Unknown phase";
+  })();
   // Realtime subscription for players in this game
   useEffect(() => {
     let isCancelled = false;
 
-    async function syncPlayers() {
+    async function syncPlayersAndMaybePhase() {
       try {
         const players = await fetchPlayersForGame(game.id);
-        if (!isCancelled) {
-          onPlayersUpdated(players);
+        if (isCancelled) return;
+
+        onPlayersUpdated(players);
+
+        // If local game.phase is still "lobby" but some players already have a role,
+        // we infer that the host started the game and we are in night_1.
+        if (
+          game.phase === "lobby" &&
+          players.some((p) => p.role && p.role.length > 0)
+        ) {
+          onGameUpdated({
+            status: "ongoing",
+            phase: "night_1",
+            dayNumber: 1,
+          });
         }
       } catch (err) {
         console.error("Error syncing players:", err);
@@ -400,7 +514,7 @@ function Lobby({
     }
 
     // Initial load
-    syncPlayers();
+    syncPlayersAndMaybePhase();
 
     const channel = supabase
       .channel(`players-game-${game.id}`)
@@ -412,26 +526,27 @@ function Lobby({
           table: "players",
           filter: `game_id=eq.${game.id}`,
         },
-        (payload) => {
-          console.log("Realtime event for players:", payload);
-          syncPlayers();
+        () => {
+          console.log("Realtime: players changed");
+          syncPlayersAndMaybePhase();
         }
       )
-      .subscribe();
+      .subscribe((status) => {
+        console.log("Realtime players channel status:", status);
+      });
 
     return () => {
       isCancelled = true;
       supabase.removeChannel(channel);
     };
-  }, [game.id, onPlayersUpdated]);
+  }, [game.id, game.phase, onPlayersUpdated, onGameUpdated]);
 
-    async function handleStartGame() {
+  async function handleStartGame() {
     if (!isHost) return;
     if (isStarting) return;
 
     setIsStarting(true);
     try {
-      // 1) Reload players from DB
       const players = await fetchPlayersForGame(game.id);
 
       if (players.length < 4) {
@@ -440,10 +555,9 @@ function Lobby({
         return;
       }
 
-      // 2) Build roles for all players
       const roles = buildRoles(players.length);
 
-      // 3) Assign roles one by one with UPDATE (much simpler than upsert)
+      // Assign roles one by one
       for (let i = 0; i < players.length; i++) {
         const p = players[i];
         const role = roles[i];
@@ -461,7 +575,7 @@ function Lobby({
         }
       }
 
-      // 4) Update game phase
+      // Update game phase to Night 1 (in DB)
       const { error: gameUpdateError } = await supabase
         .from("games")
         .update({
@@ -479,6 +593,13 @@ function Lobby({
       } else {
         console.log("Game started: night_1");
       }
+
+      // Aggiorna stato locale
+      onGameUpdated({
+        status: "ongoing",
+        phase: "night_1",
+        dayNumber: 1,
+      });
     } catch (err) {
       console.error("Error starting game:", err);
       alert(
@@ -491,37 +612,292 @@ function Lobby({
     }
   }
 
+  async function handleResolveNight() {
+    if (!isHost) return;
+    if (!isNight) return;
+    if (resolvingNight) return;
+
+    setResolvingNight(true);
+    try {
+      const dayNumber = game.dayNumber || 1;
+
+      const { data: actions, error } = await supabase
+        .from("actions")
+        .select("*")
+        .eq("game_id", game.id)
+        .eq("phase", "night")
+        .eq("day_number", dayNumber);
+
+      if (error) {
+        console.error("Error fetching actions:", error);
+        alert("Failed to fetch night actions.");
+        setResolvingNight(false);
+        return;
+      }
+
+      const mafiaActions = actions.filter(
+        (a) => a.action_type === "MAFIA_KILL" && a.target_player_id
+      );
+      const doctorActions = actions.filter(
+        (a) => a.action_type === "DOCTOR_PROTECT" && a.target_player_id
+      );
+
+      // Mafia target: majority vote
+      let mafiaTargetId = null;
+      if (mafiaActions.length > 0) {
+        const counts = {};
+        for (const a of mafiaActions) {
+          const t = a.target_player_id;
+          counts[t] = (counts[t] || 0) + 1;
+        }
+        let max = 0;
+        for (const [target, count] of Object.entries(counts)) {
+          if (count > max) {
+            max = count;
+            mafiaTargetId = target;
+          }
+        }
+      }
+
+      // Doctor latest action (if any)
+      let doctorTargetId = null;
+      if (doctorActions.length > 0) {
+        const last = doctorActions[doctorActions.length - 1];
+        doctorTargetId = last.target_player_id;
+      }
+
+      let killedName = null;
+
+      if (mafiaTargetId && mafiaTargetId !== doctorTargetId) {
+        const { data: killedPlayer, error: killError } = await supabase
+          .from("players")
+          .update({ alive: false })
+          .eq("id", mafiaTargetId)
+          .select()
+          .single();
+
+        if (killError) {
+          console.error("Error killing player:", killError);
+          alert("Failed to update killed player.");
+          setResolvingNight(false);
+          return;
+        }
+
+        killedName = killedPlayer.name;
+      }
+
+      // Reload players to see who is dead
+      const players = await fetchPlayersForGame(game.id);
+      onPlayersUpdated(players);
+
+      if (killedName) {
+        alert(`Night is over. ${killedName} was killed.`);
+      } else {
+        alert("Night is over. No one was killed.");
+      }
+
+      // Move to "day_1" (UI for daytime to be implemented later)
+      const { error: gameUpdateError } = await supabase
+        .from("games")
+        .update({
+          phase: "day_1",
+          day_number: dayNumber,
+        })
+        .eq("id", game.id);
+
+      if (gameUpdateError) {
+        console.error("Error updating game phase to day:", gameUpdateError);
+      }
+
+      onGameUpdated({
+        phase: "day_1",
+        dayNumber: dayNumber,
+      });
+    } catch (err) {
+      console.error("Error resolving night:", err);
+      alert(
+        `Unexpected error while resolving the night: ${
+          err?.message || String(err)
+        }`
+      );
+    } finally {
+      setResolvingNight(false);
+    }
+  }
+
+  // Detective: local investigation (no DB, just uses roles already in memory)
+  function handleDetectiveInvestigation(targetId) {
+    const target = game.players.find((p) => p.id === targetId);
+    if (!target) {
+      setDetectiveResult("Could not find that player.");
+      return;
+    }
+    if (!target.role) {
+      setDetectiveResult(
+        `${target.name} does not have an assigned role yet.`
+      );
+      return;
+    }
+    if (target.role === "MAFIA") {
+      setDetectiveResult(
+        `You sense something suspicious about ${target.name}...`
+      );
+    } else {
+      setDetectiveResult(
+        `${target.name} seems innocent (or at least not Mafia).`
+      );
+    }
+  }
+    async function handleResolveDay() {
+    if (!isHost) return;
+    if (!isDay) return;
+    if (resolvingDay) return;
+
+    setResolvingDay(true);
+    try {
+      const dayNumber = game.dayNumber || 1;
+
+      const { data: actions, error } = await supabase
+        .from("actions")
+        .select("*")
+        .eq("game_id", game.id)
+        .eq("phase", "day")
+        .eq("day_number", dayNumber)
+        .eq("action_type", "DAY_VOTE");
+
+      if (error) {
+        console.error("Error fetching day votes:", error);
+        alert("Failed to fetch day votes.");
+        setResolvingDay(false);
+        return;
+      }
+
+      // Compute majority
+      let lynchTargetId = null;
+
+      if (actions.length > 0) {
+        const counts = {};
+        for (const a of actions) {
+          const t = a.target_player_id;
+          if (!t) continue;
+          counts[t] = (counts[t] || 0) + 1;
+        }
+
+        let max = 0;
+        let maxId = null;
+        let tie = false;
+
+        for (const [target, count] of Object.entries(counts)) {
+          if (count > max) {
+            max = count;
+            maxId = target;
+            tie = false;
+          } else if (count === max) {
+            tie = true;
+          }
+        }
+
+        if (!tie && maxId) {
+          lynchTargetId = maxId;
+        }
+      }
+
+      let lynchedName = null;
+
+      if (lynchTargetId) {
+        const { data: lynchedPlayer, error: lynchError } = await supabase
+          .from("players")
+          .update({ alive: false })
+          .eq("id", lynchTargetId)
+          .select()
+          .single();
+
+        if (lynchError) {
+          console.error("Error lynching player:", lynchError);
+          alert("Failed to update lynched player.");
+          setResolvingDay(false);
+          return;
+        }
+
+        lynchedName = lynchedPlayer.name;
+      }
+
+      // Reload players
+      const players = await fetchPlayersForGame(game.id);
+      onPlayersUpdated(players);
+
+      if (lynchedName) {
+        alert(`Day is over. ${lynchedName} was lynched.`);
+      } else {
+        alert("Day is over. No one was lynched.");
+      }
+
+      // Move to next night
+      const nextDayNumber = (game.dayNumber || 1) + 1;
+
+      const { error: gameUpdateError } = await supabase
+        .from("games")
+        .update({
+          phase: `night_${nextDayNumber}`,
+          day_number: nextDayNumber,
+        })
+        .eq("id", game.id);
+
+      if (gameUpdateError) {
+        console.error(
+          "Error updating game phase to next night:",
+          gameUpdateError
+        );
+      }
+
+      onGameUpdated({
+        phase: `night_${nextDayNumber}`,
+        dayNumber: nextDayNumber,
+      });
+    } catch (err) {
+      console.error("Error resolving day:", err);
+      alert(
+        `Unexpected error while resolving the day: ${
+          err?.message || String(err)
+        }`
+      );
+    } finally {
+      setResolvingDay(false);
+    }
+  }
+
   return (
     <div className="app">
       <header className="header">
         <h1>🌑 Lupus @ GSSI</h1>
-        <p>Game code</p>
+        <p>{phaseLabel}</p>
         <div className="game-code">{game.code}</div>
       </header>
 
       <main className="card">
-        <h2>Lobby</h2>
+        <h2>Game lobby</h2>
         <p className="muted">
           Share this code with other players. As they join, they will appear in
           the list below automatically.
         </p>
 
         <section className="players">
-          <h3>Players in the lobby</h3>
+          <h3>Players</h3>
           <ul>
-  {game.players.map((p) => (
-    <li key={p.id} className="player-item">
-      <span>
-        {p.name}
-        {p.id === currentPlayerId ? " (you)" : ""}
-      </span>
-      <div style={{ display: "flex", gap: "0.4rem" }}>
-        {p.isHost && <span className="badge">Host</span>}
-        {/* Roles are secret: we do NOT show p.role here */}
-      </div>
-    </li>
-  ))}
-</ul>
+            {game.players.map((p) => (
+              <li key={p.id} className="player-item">
+                <span>
+                  {p.name}
+                  {p.id === currentPlayerId ? " (you)" : ""}
+                  {p.alive === false && " (dead)"}
+                </span>
+                <div style={{ display: "flex", gap: "0.4rem" }}>
+                  {p.isHost && <span className="badge">Host</span>}
+                  {/* Roles are secret: we do NOT show p.role here */}
+                </div>
+              </li>
+            ))}
+          </ul>
         </section>
 
         {me && me.role && (
@@ -540,18 +916,86 @@ function Lobby({
           </section>
         )}
 
-        {isHost && (
-          <button
-            className="btn primary"
-            onClick={handleStartGame}
-            disabled={isStarting || (me && me.role)}
+        {isNight && me && me.alive !== false && (
+          <section
+            className="players"
+            style={{ marginTop: "1rem", borderStyle: "dotted" }}
           >
-            {me && me.role
-              ? "Game already started"
-              : isStarting
-              ? "Starting..."
-              : "Start game"}
-          </button>
+            <h3>Night actions</h3>
+            {me.role === "MAFIA" && (
+              <NightMafiaActions
+                me={me}
+                game={game}
+                alivePlayers={alivePlayers}
+              />
+            )}
+            {me.role === "DOCTOR" && (
+              <NightDoctorActions
+                me={me}
+                game={game}
+                alivePlayers={alivePlayers}
+              />
+            )}
+            {me.role === "DETECTIVE" && (
+              <NightDetectiveActions
+                me={me}
+                game={game}
+                alivePlayers={alivePlayers}
+                detectiveResult={detectiveResult}
+                onInvestigate={handleDetectiveInvestigation}
+              />
+            )}
+            {me.role === "CITIZEN" && (
+              <p className="muted">
+                You are a Citizen. Try not to panic and survive the night.
+              </p>
+            )}
+          </section>
+        )}
+                {isDay && me && me.alive !== false && (
+          <section
+            className="players"
+            style={{ marginTop: "1rem", borderStyle: "dotted" }}
+          >
+            <h3>Day voting</h3>
+            <DayVotingActions
+              me={me}
+              game={game}
+              alivePlayers={alivePlayers}
+            />
+          </section>
+        )}
+
+              {isHost && (
+          <div style={{ marginTop: "1rem", display: "flex", gap: "0.75rem" }}>
+            {!me?.role && (
+              <button
+                className="btn primary"
+                onClick={handleStartGame}
+                disabled={isStarting}
+              >
+                {isStarting ? "Starting..." : "Start game"}
+              </button>
+            )}
+            {me?.role && isNight && (
+              <button
+                className="btn primary"
+                onClick={handleResolveNight}
+                disabled={resolvingNight}
+              >
+                {resolvingNight ? "Resolving..." : "Resolve night"}
+              </button>
+            )}
+            {me?.role && isDay && (
+              <button
+                className="btn primary"
+                onClick={handleResolveDay}
+                disabled={resolvingDay}
+              >
+                {resolvingDay ? "Resolving..." : "Resolve day"}
+              </button>
+            )}
+          </div>
         )}
 
         <button className="btn ghost" onClick={onLeaveGame}>
@@ -562,4 +1006,211 @@ function Lobby({
   );
 }
 
+// Night action components
+
+function NightMafiaActions({ me, game, alivePlayers }) {
+  const [targetId, setTargetId] = useState("");
+  const [status, setStatus] = useState("");
+
+  const possibleTargets = alivePlayers.filter((p) => p.id !== me.id);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    if (!targetId) {
+      setStatus("Select a target first.");
+      return;
+    }
+    try {
+      await submitNightAction({
+        gameId: game.id,
+        playerId: me.id,
+        dayNumber: game.dayNumber || 1,
+        actionType: "MAFIA_KILL",
+        targetPlayerId: targetId,
+      });
+      setStatus("Kill submitted.");
+    } catch (err) {
+      console.error("Error submitting mafia action:", err);
+      setStatus("Failed to submit action.");
+    }
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="form">
+      <label className="muted" style={{ fontSize: "0.85rem" }}>
+        Mafia: choose a player to kill tonight.
+      </label>
+      <select
+        className="input"
+        value={targetId}
+        onChange={(e) => setTargetId(e.target.value)}
+      >
+        <option value="">Select a target…</option>
+        {possibleTargets.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.name}
+          </option>
+        ))}
+      </select>
+      {status && <p className="tiny">{status}</p>}
+      <button type="submit" className="btn secondary">
+        Submit kill
+      </button>
+    </form>
+  );
+}
+
+function NightDoctorActions({ me, game, alivePlayers }) {
+  const [targetId, setTargetId] = useState("");
+  const [status, setStatus] = useState("");
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    if (!targetId) {
+      setStatus("Select someone to protect.");
+      return;
+    }
+    try {
+      await submitNightAction({
+        gameId: game.id,
+        playerId: me.id,
+        dayNumber: game.dayNumber || 1,
+        actionType: "DOCTOR_PROTECT",
+        targetPlayerId: targetId,
+      });
+      setStatus("Protection submitted.");
+    } catch (err) {
+      console.error("Error submitting doctor action:", err);
+      setStatus("Failed to submit action.");
+    }
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="form">
+      <label className="muted" style={{ fontSize: "0.85rem" }}>
+        Doctor: choose a player to protect tonight.
+      </label>
+      <select
+        className="input"
+        value={targetId}
+        onChange={(e) => setTargetId(e.target.value)}
+      >
+        <option value="">Select someone…</option>
+        {alivePlayers.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.name}
+          </option>
+        ))}
+      </select>
+      {status && <p className="tiny">{status}</p>}
+      <button type="submit" className="btn secondary">
+        Submit protection
+      </button>
+    </form>
+  );
+}
+
+function NightDetectiveActions({
+  me,
+  game,
+  alivePlayers,
+  detectiveResult,
+  onInvestigate,
+}) {
+  const [targetId, setTargetId] = useState("");
+
+  function handleSubmit(e) {
+    e.preventDefault();
+    if (!targetId) {
+      return;
+    }
+    onInvestigate(targetId);
+  }
+
+  const possibleTargets = alivePlayers.filter((p) => p.id !== me.id);
+
+  return (
+    <form onSubmit={handleSubmit} className="form">
+      <label className="muted" style={{ fontSize: "0.85rem" }}>
+        Detective: choose a player to investigate tonight.
+      </label>
+      <select
+        className="input"
+        value={targetId}
+        onChange={(e) => setTargetId(e.target.value)}
+      >
+        <option value="">Select a target…</option>
+        {possibleTargets.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.name}
+          </option>
+        ))}
+      </select>
+      <button type="submit" className="btn secondary">
+        Investigate
+      </button>
+      {detectiveResult && (
+        <p className="tiny" style={{ marginTop: "0.5rem" }}>
+          {detectiveResult}
+        </p>
+      )}
+    </form>
+  );
+}
+function DayVotingActions({ me, game, alivePlayers }) {
+  const [targetId, setTargetId] = useState("");
+  const [status, setStatus] = useState("");
+
+  const possibleTargets = alivePlayers.filter((p) => p.id !== me.id);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    if (!targetId) {
+      setStatus("Select someone to vote for.");
+      return;
+    }
+    try {
+      await submitDayVote({
+        gameId: game.id,
+        playerId: me.id,
+        dayNumber: game.dayNumber || 1,
+        targetPlayerId: targetId,
+      });
+      setStatus(
+        "Vote submitted. You can change it until the host resolves the day."
+      );
+    } catch (err) {
+      console.error("Error submitting day vote:", err);
+      setStatus("Failed to submit vote.");
+    }
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="form">
+      <label className="muted" style={{ fontSize: "0.85rem" }}>
+        During the day, discuss and vote to lynch a player.
+      </label>
+      <select
+        className="input"
+        value={targetId}
+        onChange={(e) => setTargetId(e.target.value)}
+      >
+        <option value="">Select a player…</option>
+        {possibleTargets.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.name}
+          </option>
+        ))}
+      </select>
+      {status && (
+        <p className="tiny" style={{ marginTop: "0.5rem" }}>
+          {status}
+        </p>
+      )}
+      <button type="submit" className="btn secondary">
+        Submit vote
+      </button>
+    </form>
+  );
+}
 export default App;
