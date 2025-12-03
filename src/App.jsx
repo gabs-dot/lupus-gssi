@@ -1,7 +1,7 @@
 import { useState } from "react";
 import "./App.css";
 
-// Genera un codice partita tipo "GSSI42"
+// Generate a simple game code like "ABC-123"
 function generateGameCode() {
   const letters = "ABCDEFGHJKLMNPQRSTUVWXYZ";
   const numbers = "0123456789";
@@ -23,19 +23,19 @@ function App() {
   const [playerName, setPlayerName] = useState("");
   const [currentGame, setCurrentGame] = useState(null); // { code, hostName, players: [] }
 
-  // 1) Schermata iniziale: chiediamo il nome
+  // 1) First screen: ask for the display name
   if (!playerName) {
     return (
       <div className="app">
         <header className="header">
           <h1>🌑 Lupus @ GSSI</h1>
-          <p>Gioco sociale per PhD, postdoc e prof</p>
+          <p>Social deduction game for the GSSI community</p>
         </header>
 
         <main className="card">
-          <h2>Come ti chiami?</h2>
+          <h2>What should we call you?</h2>
           <p className="muted">
-            Il tuo nome verrà mostrato agli altri giocatori durante la partita.
+            This name will be visible to other players during the game.
           </p>
           <NameForm onConfirmName={setPlayerName} />
         </main>
@@ -43,7 +43,7 @@ function App() {
     );
   }
 
-  // 2) Se esiste una partita → mostra Lobby
+  // 2) If a game exists → show the Lobby
   if (currentGame) {
     return (
       <Lobby
@@ -54,19 +54,19 @@ function App() {
     );
   }
 
-  // 3) Home dopo aver inserito il nome
+  // 3) Home after entering the name
   return (
     <div className="app">
       <header className="header">
         <h1>🌑 Lupus @ GSSI</h1>
-        <p>Benvenutə, {playerName}.</p>
+        <p>Welcome, {playerName}.</p>
       </header>
 
       <main className="card">
-        <h2>Nuova o esistente?</h2>
+        <h2>Create or join a game</h2>
         <p className="muted">
-          Puoi creare una nuova partita e condividere il codice, oppure (più
-          avanti) entrare in una partita esistente.
+          You can create a new game and share the code, or (soon) join an
+          existing one using a code.
         </p>
 
         <button
@@ -87,23 +87,23 @@ function App() {
             setCurrentGame(newGame);
           }}
         >
-          Crea una nuova partita
+          Create a new game
         </button>
 
         <button className="btn secondary" disabled>
-          Entra in una partita (presto)
+          Join a game (coming soon)
         </button>
 
         <p className="tiny">
-          Per ora la modalità “Entra in una partita” sarà attivata quando
-          colleghiamo il backend (Supabase/Firebase).
+          For now the “Join game” flow will be enabled once we connect a real
+          backend so multiple people at GSSI can share the same lobby.
         </p>
       </main>
     </div>
   );
 }
 
-// Component per chiedere il nome
+// Component: name input
 function NameForm({ onConfirmName }) {
   const [value, setValue] = useState("");
   const [error, setError] = useState("");
@@ -113,11 +113,11 @@ function NameForm({ onConfirmName }) {
     const trimmed = value.trim();
 
     if (!trimmed) {
-      setError("Scrivi almeno un carattere 😄");
+      setError("Please enter at least one character 😄");
       return;
     }
     if (trimmed.length > 20) {
-      setError("Tienilo sotto i 20 caratteri.");
+      setError("Keep it under 20 characters.");
       return;
     }
 
@@ -129,19 +129,19 @@ function NameForm({ onConfirmName }) {
     <form onSubmit={handleSubmit} className="form">
       <input
         className="input"
-        placeholder="Es. Alice, Bob, Prof. Rossi…"
+        placeholder="e.g. Alice, Bob, Prof. Rossi…"
         value={value}
         onChange={(e) => setValue(e.target.value)}
       />
       {error && <p className="error">{error}</p>}
       <button type="submit" className="btn primary">
-        Continua
+        Continue
       </button>
     </form>
   );
 }
 
-// Schermata Lobby (dopo "Crea partita")
+// Lobby screen (after “Create a new game”)
 function Lobby({ game, playerName, onLeaveGame }) {
   const isHost = game.hostName === playerName;
 
@@ -149,20 +149,20 @@ function Lobby({ game, playerName, onLeaveGame }) {
     <div className="app">
       <header className="header">
         <h1>🌑 Lupus @ GSSI</h1>
-        <p>Codice partita</p>
+        <p>Game code</p>
         <div className="game-code">{game.code}</div>
       </header>
 
       <main className="card">
         <h2>Lobby</h2>
         <p className="muted">
-          Condividi il codice con gli altri giocatori. In questa versione
-          l&apos;app funziona ancora solo localmente sul tuo dispositivo; tra
-          poco la collegheremo al backend per far entrare davvero gli altri.
+          Share this code with other players. In this version the app still
+          runs only on your device; shortly we&apos;ll hook it up to a backend
+          so everyone can join the same lobby in real time.
         </p>
 
         <section className="players">
-          <h3>Giocatori nella lobby</h3>
+          <h3>Players in the lobby</h3>
           <ul>
             {game.players.map((p) => (
               <li key={p.id} className="player-item">
@@ -175,12 +175,12 @@ function Lobby({ game, playerName, onLeaveGame }) {
 
         {isHost && (
           <button className="btn primary" disabled>
-            Avvia partita (presto)
+            Start game (coming soon)
           </button>
         )}
 
         <button className="btn ghost" onClick={onLeaveGame}>
-          Esci dalla partita
+          Leave game
         </button>
       </main>
     </div>
