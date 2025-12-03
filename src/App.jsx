@@ -7,8 +7,8 @@ function App() {
   return (
     <div className="app">
       <header className="header">
-        <h1>🌑 Lupus nel mio Istituto</h1>
-        <p>Gioco online per la nostra scuola</p>
+        <h1>🌑 Lupus @ GSSI</h1>
+        <p>Try to survive!</p>
       </header>
 
       {page === "home" && (
