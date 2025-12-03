@@ -20,6 +20,40 @@ function generateGameCode() {
   return `${part1}-${part2}`;
 }
 
+// Fisher–Yates shuffle
+function shuffle(array) {
+  const arr = [...array];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+// Build a simple role distribution given number of players
+function buildRoles(playerCount) {
+  const roles = [];
+
+  // Very simple rules for now:
+  // - 1 Mafia per ~4 players (at least 1)
+  // - 1 Detective
+  // - 1 Doctor
+  // - rest Citizens
+  const mafiaCount = Math.max(1, Math.floor(playerCount / 4));
+  for (let i = 0; i < mafiaCount; i++) {
+    roles.push("MAFIA");
+  }
+
+  roles.push("DETECTIVE");
+  roles.push("DOCTOR");
+
+  while (roles.length < playerCount) {
+    roles.push("CITIZEN");
+  }
+
+  return shuffle(roles);
+}
+
 // Helper to load all players for a game from Supabase
 async function fetchPlayersForGame(gameId) {
   const { data, error } = await supabase
@@ -36,12 +70,15 @@ async function fetchPlayersForGame(gameId) {
     id: p.id,
     name: p.name,
     isHost: p.is_host,
+    role: p.role,
+    alive: p.alive,
   }));
 }
 
 function App() {
   const [playerName, setPlayerName] = useState("");
   const [currentGame, setCurrentGame] = useState(null); // { id, code, hostName, players: [] }
+  const [currentPlayerId, setCurrentPlayerId] = useState(null);
   const [showJoin, setShowJoin] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
 
@@ -66,12 +103,16 @@ function App() {
   }
 
   // 2) If a game exists → show the Lobby
-  if (currentGame) {
+  if (currentGame && currentPlayerId) {
     return (
       <Lobby
         playerName={playerName}
+        currentPlayerId={currentPlayerId}
         game={currentGame}
-        onLeaveGame={() => setCurrentGame(null)}
+        onLeaveGame={() => {
+          setCurrentGame(null);
+          setCurrentPlayerId(null);
+        }}
         onPlayersUpdated={(players) =>
           setCurrentGame((prev) =>
             prev
@@ -118,6 +159,8 @@ function App() {
                   code,
                   host_name: playerName,
                   status: "lobby",
+                  phase: "lobby",
+                  day_number: 0,
                 })
                 .select()
                 .single();
@@ -135,6 +178,7 @@ function App() {
                   game_id: game.id,
                   name: playerName,
                   is_host: true,
+                  alive: true,
                 })
                 .select()
                 .single();
@@ -158,6 +202,7 @@ function App() {
               };
 
               setCurrentGame(newGame);
+              setCurrentPlayerId(player.id);
             } catch (err) {
               console.error(err);
               alert("Unexpected error while creating the game.");
@@ -179,7 +224,10 @@ function App() {
         {showJoin && (
           <JoinGameForm
             playerName={playerName}
-            onJoinedGame={setCurrentGame}
+            onJoinedGame={(game, playerId) => {
+              setCurrentGame(game);
+              setCurrentPlayerId(playerId);
+            }}
           />
         )}
 
@@ -274,6 +322,7 @@ function JoinGameForm({ playerName, onJoinedGame }) {
           game_id: game.id,
           name: playerName,
           is_host: false,
+          alive: true,
         })
         .select()
         .single();
@@ -294,7 +343,7 @@ function JoinGameForm({ playerName, onJoinedGame }) {
         players,
       };
 
-      onJoinedGame(joinedGame);
+      onJoinedGame(joinedGame, player.id);
     } catch (err) {
       console.error(err);
       setError("Unexpected error while joining the game.");
@@ -323,8 +372,17 @@ function JoinGameForm({ playerName, onJoinedGame }) {
 }
 
 // Lobby screen (after “Create a new game” or join)
-function Lobby({ game, playerName, onLeaveGame, onPlayersUpdated }) {
+function Lobby({
+  game,
+  playerName,
+  currentPlayerId,
+  onLeaveGame,
+  onPlayersUpdated,
+}) {
   const isHost = game.hostName === playerName;
+  const [isStarting, setIsStarting] = useState(false);
+
+  const me = game.players.find((p) => p.id === currentPlayerId) || null;
 
   // Realtime subscription for players in this game
   useEffect(() => {
@@ -359,15 +417,79 @@ function Lobby({ game, playerName, onLeaveGame, onPlayersUpdated }) {
           syncPlayers();
         }
       )
-      .subscribe((status) => {
-        console.log("Realtime channel status:", status);
-      });
+      .subscribe();
 
     return () => {
       isCancelled = true;
       supabase.removeChannel(channel);
     };
   }, [game.id, onPlayersUpdated]);
+
+    async function handleStartGame() {
+    if (!isHost) return;
+    if (isStarting) return;
+
+    setIsStarting(true);
+    try {
+      // 1) Reload players from DB
+      const players = await fetchPlayersForGame(game.id);
+
+      if (players.length < 4) {
+        alert("You need at least 4 players to start a game.");
+        setIsStarting(false);
+        return;
+      }
+
+      // 2) Build roles for all players
+      const roles = buildRoles(players.length);
+
+      // 3) Assign roles one by one with UPDATE (much simpler than upsert)
+      for (let i = 0; i < players.length; i++) {
+        const p = players[i];
+        const role = roles[i];
+
+        const { error } = await supabase
+          .from("players")
+          .update({ role, alive: true })
+          .eq("id", p.id);
+
+        if (error) {
+          console.error("Error updating player role:", p, error);
+          alert(`Failed to assign roles: ${error.message}`);
+          setIsStarting(false);
+          return;
+        }
+      }
+
+      // 4) Update game phase
+      const { error: gameUpdateError } = await supabase
+        .from("games")
+        .update({
+          status: "ongoing",
+          phase: "night_1",
+          day_number: 1,
+        })
+        .eq("id", game.id);
+
+      if (gameUpdateError) {
+        console.error("Error updating game phase:", gameUpdateError);
+        alert(
+          `Roles assigned, but failed to update game phase: ${gameUpdateError.message}`
+        );
+      } else {
+        console.log("Game started: night_1");
+      }
+    } catch (err) {
+      console.error("Error starting game:", err);
+      alert(
+        `Unexpected error while starting the game: ${
+          err?.message || String(err)
+        }`
+      );
+    } finally {
+      setIsStarting(false);
+    }
+  }
 
   return (
     <div className="app">
@@ -389,16 +511,50 @@ function Lobby({ game, playerName, onLeaveGame, onPlayersUpdated }) {
           <ul>
             {game.players.map((p) => (
               <li key={p.id} className="player-item">
-                <span>{p.name}</span>
-                {p.isHost && <span className="badge">Host</span>}
+                <span>
+                  {p.name}
+                  {p.id === currentPlayerId ? " (you)" : ""}
+                </span>
+                <div style={{ display: "flex", gap: "0.4rem" }}>
+                  {p.isHost && <span className="badge">Host</span>}
+                  {p.role && (
+                    <span className="badge" style={{ opacity: 0.7 }}>
+                      {p.role}
+                    </span>
+                  )}
+                </div>
               </li>
             ))}
           </ul>
         </section>
 
+        {me && me.role && (
+          <section
+            className="players"
+            style={{ marginTop: "1rem", borderStyle: "dashed" }}
+          >
+            <h3>Your role</h3>
+            <p className="muted">
+              This information is only visible on your device (other players
+              see only their own roles).
+            </p>
+            <p style={{ fontSize: "1.1rem", marginTop: "0.5rem" }}>
+              🃏 <strong>{me.role}</strong>
+            </p>
+          </section>
+        )}
+
         {isHost && (
-          <button className="btn primary" disabled>
-            Start game (coming soon)
+          <button
+            className="btn primary"
+            onClick={handleStartGame}
+            disabled={isStarting || (me && me.role)}
+          >
+            {me && me.role
+              ? "Game already started"
+              : isStarting
+              ? "Starting..."
+              : "Start game"}
           </button>
         )}
 
