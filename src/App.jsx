@@ -849,7 +849,30 @@ function JoinGameForm({ playerName, onJoinedGame }) {
 /* -------------------------------------------------------
    Lobby + Night + Day UI
 ------------------------------------------------------- */
+// -------------------------------------------------------
+// Calcola eventuale vincitore a partire dai players
+// -------------------------------------------------------
+function computeWinnerFromPlayers(players) {
+  const aliveNonHost = players.filter(
+    (p) => p.alive !== false && !p.isHost
+  );
+  const mafiaAlive = aliveNonHost.filter((p) => p.role === "MAFIA").length;
+  const goodAlive = aliveNonHost.length - mafiaAlive;
 
+  if (aliveNonHost.length === 0) {
+    return null; // situazione strana, nessuno vivo
+  }
+
+  if (mafiaAlive === 0) {
+    return "VILLAGERS"; // tutti i mafia morti
+  }
+
+  if (mafiaAlive >= goodAlive) {
+    return "MAFIA"; // mafia >= buoni => mafia vince
+  }
+
+  return null; // partita continua
+}
 function Lobby({
   game,
   account,
@@ -882,7 +905,8 @@ function Lobby({
     (p) => p.alive !== false && !p.isHost
   );
   const isDead = !!me && me.alive === false;
-
+  const isGameOver =
+    game.status === "ended" || game.phase === "ended";
   const phaseLabel = (() => {
     if (game.phase === "lobby") return "Lobby";
     if (isNight) return `Night ${game.dayNumber || 1}`;
@@ -1087,7 +1111,7 @@ function Lobby({
     }
   }
 
-  async function handleResolveNight() {
+   async function handleResolveNight() {
     if (!isHost) return;
     if (!isNight) return;
     if (resolvingNight) return;
@@ -1106,7 +1130,6 @@ function Lobby({
       if (error) {
         console.error("Error fetching night actions:", error);
         alert("Failed to fetch night actions.");
-        setResolvingNight(false);
         return;
       }
 
@@ -1152,13 +1175,13 @@ function Lobby({
         if (killError) {
           console.error("Error killing player:", killError);
           alert("Failed to update killed player.");
-          setResolvingNight(false);
           return;
         }
 
         killedName = killedPlayer.name;
       }
 
+      // Reload players to see who is dead
       const players = await fetchPlayersForGame(game.id);
       onPlayersUpdated(players);
 
@@ -1168,6 +1191,35 @@ function Lobby({
         alert("Night is over. No one was killed.");
       }
 
+      // 👉 Controllo fine partita
+      const winner = computeWinnerFromPlayers(players);
+      if (winner) {
+        const { error: gameEndError } = await supabase
+          .from("games")
+          .update({
+            status: "ended",
+            phase: "ended",
+          })
+          .eq("id", game.id);
+
+        if (gameEndError) {
+          console.error("Error updating game to ended:", gameEndError);
+        }
+
+        onGameUpdated({
+          status: "ended",
+          phase: "ended",
+        });
+
+        alert(
+          `Game over! ${
+            winner === "MAFIA" ? "Mafia" : "Villagers"
+          } win the game.`
+        );
+        return; // non passiamo al giorno
+      }
+
+      // Se il gioco non è finito, passiamo al giorno
       const dayNumberToUse = game.dayNumber || 1;
 
       const { error: gameUpdateError } = await supabase
@@ -1198,7 +1250,7 @@ function Lobby({
     }
   }
 
-  async function handleResolveDay() {
+   async function handleResolveDay() {
     if (!isHost) return;
     if (!isDay) return;
     if (resolvingDay) return;
@@ -1218,7 +1270,6 @@ function Lobby({
       if (error) {
         console.error("Error fetching day votes:", error);
         alert("Failed to fetch day votes.");
-        setResolvingDay(false);
         return;
       }
 
@@ -1264,7 +1315,6 @@ function Lobby({
         if (lynchError) {
           console.error("Error lynching player:", lynchError);
           alert("Failed to update lynched player.");
-          setResolvingDay(false);
           return;
         }
 
@@ -1280,6 +1330,35 @@ function Lobby({
         alert("Day is over. No one was lynched.");
       }
 
+      // 👉 Controllo fine partita dopo la votazione
+      const winner = computeWinnerFromPlayers(players);
+      if (winner) {
+        const { error: gameEndError } = await supabase
+          .from("games")
+          .update({
+            status: "ended",
+            phase: "ended",
+          })
+          .eq("id", game.id);
+
+        if (gameEndError) {
+          console.error("Error updating game to ended:", gameEndError);
+        }
+
+        onGameUpdated({
+          status: "ended",
+          phase: "ended",
+        });
+
+        alert(
+          `Game over! ${
+            winner === "MAFIA" ? "Mafia" : "Villagers"
+          } win the game.`
+        );
+        return; // non passiamo alla notte
+      }
+
+      // Nessun vincitore ancora → notte successiva
       const nextDayNumber = (game.dayNumber || 1) + 1;
 
       const { error: gameUpdateError } = await supabase
@@ -1310,6 +1389,40 @@ function Lobby({
       );
     } finally {
       setResolvingDay(false);
+    }
+  }
+    async function handleEndGameManual() {
+    if (!isHost) return;
+    const confirmed = window.confirm(
+      "End this game for everyone? Players will no longer be able to act."
+    );
+    if (!confirmed) return;
+
+    try {
+      const { error } = await supabase
+        .from("games")
+        .update({
+          status: "ended",
+          phase: "ended",
+        })
+        .eq("id", game.id);
+
+      if (error) {
+        console.error("Error ending game:", error);
+        alert("Failed to end the game.");
+        return;
+      }
+
+      onGameUpdated({
+        status: "ended",
+        phase: "ended",
+      });
+
+      alert("Game ended.");
+      onLeaveGame(); // l'host esce
+    } catch (err) {
+      console.error("Error ending game manually:", err);
+      alert("Unexpected error while ending the game.");
     }
   }
 
@@ -1454,7 +1567,7 @@ function Lobby({
           </section>
         )}
 
-        {isNight && me && me.alive !== false && me.role && (
+          {!isGameOver && isNight && me && me.alive !== false && me.role &&  (
           <section
             className="players"
             style={{ marginTop: "1rem", borderStyle: "dotted" }}
@@ -1491,7 +1604,7 @@ function Lobby({
           </section>
         )}
 
-        {isDay && me && me.alive !== false && me.role && (
+        {!isGameOver && isDay && me && me.alive !== false && me.role && (
           <section
             className="players"
             style={{ marginTop: "1rem", borderStyle: "dotted" }}
@@ -1615,10 +1728,10 @@ function Lobby({
               )}
             </section>
 
-            <div
-              style={{ marginTop: "1rem", display: "flex", gap: "0.75rem" }}
+                                    <div
+              style={{ marginTop: "1rem", display: "flex", gap: "0.75rem", flexWrap: "wrap" }}
             >
-              {game.phase === "lobby" && (
+              {!isGameOver && game.phase === "lobby" && (
                 <button
                   className="btn primary"
                   onClick={handleStartGame}
@@ -1627,7 +1740,7 @@ function Lobby({
                   {isStarting ? "Starting..." : "Start game"}
                 </button>
               )}
-              {isNight && (
+              {!isGameOver && isNight && (
                 <button
                   className="btn primary"
                   onClick={handleResolveNight}
@@ -1636,13 +1749,23 @@ function Lobby({
                   {resolvingNight ? "Resolving..." : "Resolve night"}
                 </button>
               )}
-              {isDay && (
+              {!isGameOver && isDay && (
                 <button
                   className="btn primary"
                   onClick={handleResolveDay}
                   disabled={resolvingDay}
                 >
                   {resolvingDay ? "Resolving..." : "Resolve day"}
+                </button>
+              )}
+
+              {/* Nuovo pulsante: termina partita ed esci */}
+              {!isGameOver && (
+                <button
+                  className="btn ghost"
+                  onClick={handleEndGameManual}
+                >
+                  End game &amp; leave
                 </button>
               )}
             </div>
