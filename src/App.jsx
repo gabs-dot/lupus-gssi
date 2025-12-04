@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import "./App.css";
 import { supabase } from "./supabaseClient";
+
 // 🔐 Account (login / register)
 const ACCOUNT_SESSION_KEY = "lupus_gssi_account";
 
@@ -154,7 +155,6 @@ async function submitNightAction({
   actionType,
   targetPlayerId,
 }) {
-  // Remove previous action of this type for this player/night
   await supabase
     .from("actions")
     .delete()
@@ -180,7 +180,6 @@ async function submitNightAction({
 
 // Insert/update a day vote action
 async function submitDayVote({ gameId, playerId, dayNumber, targetPlayerId }) {
-  // Remove previous vote from this player for this day
   await supabase
     .from("actions")
     .delete()
@@ -265,15 +264,15 @@ function App() {
   const [account, setAccount] = useState(null);
   const [authInitializing, setAuthInitializing] = useState(true);
 
-  // 🧑‍🤝‍🧑 Gioco
+  // 🧑‍🤝‍🧑 Game
   const [playerName, setPlayerName] = useState("");
-  const [currentGame, setCurrentGame] = useState(null); // { id, code, hostName, status, phase, dayNumber, players: [] }
+  const [currentGame, setCurrentGame] = useState(null);
   const [currentPlayerId, setCurrentPlayerId] = useState(null);
   const [showJoin, setShowJoin] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
   const [gameInitializing, setGameInitializing] = useState(true);
 
-  // 🔁 Ripristina l'ACCOUNT da localStorage (login persistente)
+  // 🔁 Restore account from localStorage
   useEffect(() => {
     try {
       const raw = localStorage.getItem(ACCOUNT_SESSION_KEY);
@@ -298,14 +297,14 @@ function App() {
     }
   }, []);
 
-  // 🔗 Collega l'account al playerName (username = nome nel gioco)
+  // 🔗 Link account.username → playerName
   useEffect(() => {
     if (account && !playerName) {
       setPlayerName(account.username);
     }
   }, [account, playerName]);
 
-  // 🔁 Prova a riprendere una partita salvata (gameId + playerId)
+  // 🔁 Restore game session (gameId + playerId)
   useEffect(() => {
     async function tryResumeGameSession() {
       try {
@@ -330,7 +329,6 @@ function App() {
           return;
         }
 
-        // Se non abbiamo ancora messo il nome, usiamo quello salvato
         if (!playerName) {
           setPlayerName(saved.playerName);
         }
@@ -348,7 +346,7 @@ function App() {
     tryResumeGameSession();
   }, [playerName]);
 
-  // ⏳ Finché stiamo controllando l'account
+  // ⏳ Checking account
   if (authInitializing) {
     return (
       <div className="app">
@@ -362,7 +360,7 @@ function App() {
     );
   }
 
-  // 🔑 Se non c'è account → schermata Login / Register
+  // 🔑 No account → show AuthScreen
   if (!account) {
     return (
       <AuthScreen
@@ -374,7 +372,7 @@ function App() {
     );
   }
 
-  // ⏳ Finché stiamo provando a riprendere la partita
+  // ⏳ Trying to reconnect to last game
   if (gameInitializing) {
     return (
       <div className="app">
@@ -388,7 +386,7 @@ function App() {
     );
   }
 
-  // 1) First screen: ask for the display name (di solito viene già dal login)
+  // First screen: ask for display name (usually already set from account)
   if (!playerName) {
     return (
       <div className="app">
@@ -408,7 +406,7 @@ function App() {
     );
   }
 
-  // 2) If a game exists → show the Lobby / Night / Day UI
+  // If already in a game → show lobby/game UI
   if (currentGame && currentPlayerId) {
     return (
       <Lobby
@@ -444,7 +442,7 @@ function App() {
     );
   }
 
-  // 3) Home after entering the name
+  // Home after entering the name
   return (
     <div className="app">
       <header className="header">
@@ -467,7 +465,6 @@ function App() {
             setIsBusy(true);
 
             try {
-              // 1) Create game in Supabase
               const code = generateGameCode();
 
               const { data: game, error: gameError } = await supabase
@@ -488,7 +485,7 @@ function App() {
                 return;
               }
 
-              // 2) Insert host as first player (master, no role)
+              // Host = master, no role
               const { data: player, error: playerError } = await supabase
                 .from("players")
                 .insert({
@@ -509,10 +506,8 @@ function App() {
                 return;
               }
 
-              // 3) Load full game
               const hydrated = await hydrateGame(game.id);
 
-              // Save session for rejoin
               saveGameSession({
                 gameId: game.id,
                 playerId: player.id,
@@ -543,7 +538,6 @@ function App() {
           <JoinGameForm
             playerName={playerName}
             onJoinedGame={(game, playerId) => {
-              // Save session for rejoin
               saveGameSession({
                 gameId: game.id,
                 playerId,
@@ -603,8 +597,7 @@ function NameForm({ onConfirmName }) {
   );
 }
 
-// Component: join game by code
-// Component: join game by code
+// Component: join game by code (with rejoin if same name)
 function JoinGameForm({ playerName, onJoinedGame }) {
   const [codeInput, setCodeInput] = useState("");
   const [error, setError] = useState("");
@@ -623,7 +616,6 @@ function JoinGameForm({ playerName, onJoinedGame }) {
     setIsJoining(true);
 
     try {
-      // 1) Look up the game by code
       const { data: game, error: gameError } = await supabase
         .from("games")
         .select("*")
@@ -636,7 +628,7 @@ function JoinGameForm({ playerName, onJoinedGame }) {
         return;
       }
 
-      // 2) Check if this name is already a player in that game
+      // Check if this name already exists in this game
       const { data: existingPlayers, error: existingError } = await supabase
         .from("players")
         .select("*")
@@ -653,13 +645,11 @@ function JoinGameForm({ playerName, onJoinedGame }) {
       const existingPlayer = existingPlayers?.[0] || null;
 
       if (existingPlayer) {
-        // ✅ Rejoin as this existing player (works even if game already started)
         const hydrated = await hydrateGame(game.id);
         onJoinedGame(hydrated, existingPlayer.id);
         return;
       }
 
-      // 3) If game already started and you're NOT a player, you can't join
       if (game.status !== "lobby") {
         setError(
           "This game has already started and you are not part of it."
@@ -667,7 +657,6 @@ function JoinGameForm({ playerName, onJoinedGame }) {
         return;
       }
 
-      // 4) Otherwise, it's lobby and you're a new player → insert as usual
       const { data: player, error: playerError } = await supabase
         .from("players")
         .insert({
@@ -732,7 +721,8 @@ function Lobby({
   const [dayStatus, setDayStatus] = useState(null);
   const [actionsLoading, setActionsLoading] = useState(false);
 
-  const me = game.players.find((p) => p.id === currentPlayerId) || null;
+  const me =
+    game.players.find((p) => p.id === currentPlayerId) || null;
 
   const isNight =
     game.phase === "night_1" ||
@@ -745,7 +735,9 @@ function Lobby({
   const alivePlayers = game.players.filter(
     (p) => p.alive !== false && !p.isHost
   );
+
   const isDead = !!me && me.alive === false;
+
   const phaseLabel = (() => {
     if (game.phase === "lobby") return "Lobby";
     if (isNight) return `Night ${game.dayNumber || 1}`;
@@ -753,7 +745,7 @@ function Lobby({
     return game.phase || "Unknown phase";
   })();
 
-  // Realtime subscription for players in this game
+  // Realtime: players (join/leave/role/deaths)
   useEffect(() => {
     let isCancelled = false;
 
@@ -764,7 +756,6 @@ function Lobby({
 
         onPlayersUpdated(players);
 
-        // If still lobby but roles now exist, assume host started game → night 1
         if (
           game.phase === "lobby" &&
           players.some((p) => p.role && p.role.length > 0)
@@ -780,7 +771,6 @@ function Lobby({
       }
     }
 
-    // Initial load
     syncPlayersAndMaybePhase();
 
     const channel = supabase
@@ -788,7 +778,7 @@ function Lobby({
       .on(
         "postgres_changes",
         {
-          event: "*", // INSERT, UPDATE, DELETE
+          event: "*",
           schema: "public",
           table: "players",
           filter: `game_id=eq.${game.id}`,
@@ -808,7 +798,7 @@ function Lobby({
     };
   }, [game.id, game.phase, onPlayersUpdated, onGameUpdated]);
 
-    // Realtime subscription for game phase/status (night/day) for all clients
+  // Realtime: game phase/status (night/day) for all clients
   useEffect(() => {
     let cancelled = false;
 
@@ -829,7 +819,6 @@ function Lobby({
       }
     }
 
-    // Initial load of game data
     syncGame();
 
     const channel = supabase
@@ -897,7 +886,6 @@ function Lobby({
 
       const roles = buildRoles(nonHostPlayers.length);
 
-      // Assign roles only to non-host players
       for (let i = 0; i < nonHostPlayers.length; i++) {
         const p = nonHostPlayers[i];
         const role = roles[i];
@@ -915,7 +903,6 @@ function Lobby({
         }
       }
 
-      // Ensure host is alive and has NO role
       const { error: hostUpdateError } = await supabase
         .from("players")
         .update({ role: null, alive: true })
@@ -928,7 +915,6 @@ function Lobby({
         return;
       }
 
-      // Update game phase to Night 1 (in DB)
       const { error: gameUpdateError } = await supabase
         .from("games")
         .update({
@@ -947,7 +933,6 @@ function Lobby({
         console.log("Game started: night_1");
       }
 
-      // Local state
       onGameUpdated({
         status: "ongoing",
         phase: "night_1",
@@ -995,7 +980,6 @@ function Lobby({
         (a) => a.action_type === "DOCTOR_PROTECT" && a.target_player_id
       );
 
-      // Mafia target: majority vote
       let mafiaTargetId = null;
       if (mafiaActions.length > 0) {
         const counts = {};
@@ -1012,7 +996,6 @@ function Lobby({
         }
       }
 
-      // Doctor latest action (if any)
       let doctorTargetId = null;
       if (doctorActions.length > 0) {
         const last = doctorActions[doctorActions.length - 1];
@@ -1039,7 +1022,6 @@ function Lobby({
         killedName = killedPlayer.name;
       }
 
-      // Reload players to see who is dead
       const players = await fetchPlayersForGame(game.id);
       onPlayersUpdated(players);
 
@@ -1049,7 +1031,6 @@ function Lobby({
         alert("Night is over. No one was killed.");
       }
 
-      // Move to "day_1" (or current day)
       const dayNumberToUse = game.dayNumber || 1;
 
       const { error: gameUpdateError } = await supabase
@@ -1104,7 +1085,6 @@ function Lobby({
         return;
       }
 
-      // Compute majority
       let lynchTargetId = null;
 
       if (actions.length > 0) {
@@ -1154,7 +1134,6 @@ function Lobby({
         lynchedName = lynchedPlayer.name;
       }
 
-      // Reload players
       const players = await fetchPlayersForGame(game.id);
       onPlayersUpdated(players);
 
@@ -1164,7 +1143,6 @@ function Lobby({
         alert("Day is over. No one was lynched.");
       }
 
-      // Move to next night
       const nextDayNumber = (game.dayNumber || 1) + 1;
 
       const { error: gameUpdateError } = await supabase
@@ -1198,7 +1176,6 @@ function Lobby({
     }
   }
 
-  // Detective: local investigation (no DB for result, just uses roles already in memory)
   function handleDetectiveInvestigation(targetId) {
     const target = game.players.find((p) => p.id === targetId);
     if (!target) {
@@ -1274,7 +1251,6 @@ function Lobby({
                 </span>
                 <div style={{ display: "flex", gap: "0.4rem" }}>
                   {p.isHost && <span className="badge">Host</span>}
-                  {/* Only the host (master) sees roles here */}
                   {isHost && p.role && (
                     <span className="badge">{p.role}</span>
                   )}
@@ -1283,7 +1259,7 @@ function Lobby({
             ))}
           </ul>
         </section>
-        {/* Message for eliminated players (non-host) */}
+
         {!isHost && isDead && (
           <section
             className="players"
@@ -1300,15 +1276,12 @@ function Lobby({
             </p>
             {me.role && (
               <p style={{ marginTop: "0.5rem" }}>
-                You were:{" "}
-                <strong>
-                  {me.role}
-                </strong>
+                You were: <strong>{me.role}</strong>
               </p>
             )}
           </section>
         )}
-        {/* Player-side role & actions (host has no role → non vede nulla di questo) */}
+
         {me && me.role && (
           <section
             className="players"
@@ -1372,7 +1345,6 @@ function Lobby({
           </section>
         )}
 
-        {/* Host = master: sees master panel + control buttons, but never plays */}
         {isHost && (
           <>
             <section
@@ -1643,7 +1615,7 @@ function NightDetectiveActions({
   const [targetId, setTargetId] = useState("");
   const [status, setStatus] = useState("");
 
-    const possibleTargets = alivePlayers.filter(
+  const possibleTargets = alivePlayers.filter(
     (p) => p.id !== me.id && !p.isHost
   );
 
@@ -1759,6 +1731,8 @@ function DayVotingActions({ me, game, alivePlayers }) {
     </form>
   );
 }
+
+// Auth screen: login / register
 function AuthScreen({ onLoggedIn }) {
   const [mode, setMode] = useState("login"); // "login" | "register"
   const [username, setUsername] = useState("");
