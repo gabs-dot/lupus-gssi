@@ -1,6 +1,46 @@
 import { useState, useEffect } from "react";
 import "./App.css";
 import { supabase } from "./supabaseClient";
+// 🔐 Account (login / register)
+const ACCOUNT_SESSION_KEY = "lupus_gssi_account";
+
+function saveAccountSession(account) {
+  try {
+    localStorage.setItem(ACCOUNT_SESSION_KEY, JSON.stringify(account));
+  } catch (e) {
+    console.error("Failed to save account session", e);
+  }
+}
+
+function clearAccountSession() {
+  try {
+    localStorage.removeItem(ACCOUNT_SESSION_KEY);
+  } catch (e) {
+    console.error("Failed to clear account session", e);
+  }
+}
+
+// 🎮 Game session (rejoin a specific game as a specific player)
+const GAME_SESSION_KEY = "lupus_gssi_session";
+
+function saveGameSession({ gameId, playerId, playerName }) {
+  try {
+    localStorage.setItem(
+      GAME_SESSION_KEY,
+      JSON.stringify({ gameId, playerId, playerName })
+    );
+  } catch (e) {
+    console.error("Failed to save game session", e);
+  }
+}
+
+function clearGameSession() {
+  try {
+    localStorage.removeItem(GAME_SESSION_KEY);
+  } catch (e) {
+    console.error("Failed to clear game session", e);
+  }
+}
 
 // Generate a simple game code like "ABC-123"
 function generateGameCode() {
@@ -9,12 +49,14 @@ function generateGameCode() {
 
   let part1 = "";
   for (let i = 0; i < 3; i++) {
-    part1 += letters[Math.floor(Math.random() * letters.length)];
+    const index = Math.floor(Math.random() * letters.length);
+    part1 += letters[index];
   }
 
   let part2 = "";
   for (let i = 0; i < 3; i++) {
-    part2 += numbers[Math.floor(Math.random() * numbers.length)];
+    const index = Math.floor(Math.random() * numbers.length);
+    part2 += numbers[index];
   }
 
   return `${part1}-${part2}`;
@@ -30,7 +72,7 @@ function shuffle(array) {
   return arr;
 }
 
-// Build a simple role distribution given number of players
+// Build a simple role distribution given number of NON-HOST players
 function buildRoles(playerCount) {
   const roles = [];
 
@@ -104,7 +146,7 @@ async function hydrateGame(gameId) {
   return { ...game, players };
 }
 
-// Insert/update a night action for a player (Mafia/Doctor)
+// Insert/update a night action for a player (Mafia/Doctor/Detective)
 async function submitNightAction({
   gameId,
   playerId,
@@ -135,6 +177,7 @@ async function submitNightAction({
     throw error;
   }
 }
+
 // Insert/update a day vote action
 async function submitDayVote({ gameId, playerId, dayNumber, targetPlayerId }) {
   // Remove previous vote from this player for this day
@@ -160,15 +203,192 @@ async function submitDayVote({ gameId, playerId, dayNumber, targetPlayerId }) {
     throw error;
   }
 }
+
+// For host: status of night actions per player
+async function fetchNightActionStatus(gameId, dayNumber) {
+  const { data, error } = await supabase
+    .from("actions")
+    .select("player_id, action_type")
+    .eq("game_id", gameId)
+    .eq("phase", "night")
+    .eq("day_number", dayNumber);
+
+  if (error) {
+    throw error;
+  }
+
+  const status = {};
+  for (const a of data) {
+    if (!status[a.player_id]) {
+      status[a.player_id] = {
+        mafiaKill: false,
+        doctorProtect: false,
+        detectiveInvestigate: false,
+      };
+    }
+    if (a.action_type === "MAFIA_KILL") {
+      status[a.player_id].mafiaKill = true;
+    }
+    if (a.action_type === "DOCTOR_PROTECT") {
+      status[a.player_id].doctorProtect = true;
+    }
+    if (a.action_type === "DETECTIVE_INVESTIGATE") {
+      status[a.player_id].detectiveInvestigate = true;
+    }
+  }
+  return status;
+}
+
+// For host: status of day votes (who has voted)
+async function fetchDayVoteStatus(gameId, dayNumber) {
+  const { data, error } = await supabase
+    .from("actions")
+    .select("player_id")
+    .eq("game_id", gameId)
+    .eq("phase", "day")
+    .eq("day_number", dayNumber)
+    .eq("action_type", "DAY_VOTE");
+
+  if (error) {
+    throw error;
+  }
+
+  const status = {};
+  for (const a of data) {
+    status[a.player_id] = true;
+  }
+  return status;
+}
+
 function App() {
+  // 👤 Account (login / register)
+  const [account, setAccount] = useState(null);
+  const [authInitializing, setAuthInitializing] = useState(true);
+
+  // 🧑‍🤝‍🧑 Gioco
   const [playerName, setPlayerName] = useState("");
   const [currentGame, setCurrentGame] = useState(null); // { id, code, hostName, status, phase, dayNumber, players: [] }
   const [currentPlayerId, setCurrentPlayerId] = useState(null);
   const [showJoin, setShowJoin] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
-  const [resolvingDay, setResolvingDay] = useState(false);
+  const [gameInitializing, setGameInitializing] = useState(true);
 
-  // 1) First screen: ask for the display name
+  // 🔁 Ripristina l'ACCOUNT da localStorage (login persistente)
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(ACCOUNT_SESSION_KEY);
+      if (!raw) {
+        setAuthInitializing(false);
+        return;
+      }
+
+      const saved = JSON.parse(raw);
+      if (!saved.id || !saved.username) {
+        clearAccountSession();
+        setAuthInitializing(false);
+        return;
+      }
+
+      setAccount(saved);
+    } catch (e) {
+      console.error("Error restoring account", e);
+      clearAccountSession();
+    } finally {
+      setAuthInitializing(false);
+    }
+  }, []);
+
+  // 🔗 Collega l'account al playerName (username = nome nel gioco)
+  useEffect(() => {
+    if (account && !playerName) {
+      setPlayerName(account.username);
+    }
+  }, [account, playerName]);
+
+  // 🔁 Prova a riprendere una partita salvata (gameId + playerId)
+  useEffect(() => {
+    async function tryResumeGameSession() {
+      try {
+        const raw = localStorage.getItem(GAME_SESSION_KEY);
+        if (!raw) {
+          setGameInitializing(false);
+          return;
+        }
+
+        const saved = JSON.parse(raw);
+        if (!saved.gameId || !saved.playerId || !saved.playerName) {
+          clearGameSession();
+          setGameInitializing(false);
+          return;
+        }
+
+        const game = await hydrateGame(saved.gameId);
+        const me = game.players.find((p) => p.id === saved.playerId);
+        if (!me) {
+          clearGameSession();
+          setGameInitializing(false);
+          return;
+        }
+
+        // Se non abbiamo ancora messo il nome, usiamo quello salvato
+        if (!playerName) {
+          setPlayerName(saved.playerName);
+        }
+
+        setCurrentGame(game);
+        setCurrentPlayerId(saved.playerId);
+      } catch (err) {
+        console.error("Error restoring game session", err);
+        clearGameSession();
+      } finally {
+        setGameInitializing(false);
+      }
+    }
+
+    tryResumeGameSession();
+  }, [playerName]);
+
+  // ⏳ Finché stiamo controllando l'account
+  if (authInitializing) {
+    return (
+      <div className="app">
+        <header className="header">
+          <h1>🌑 Lupus @ GSSI</h1>
+        </header>
+        <main className="card">
+          <p className="muted">Checking your account…</p>
+        </main>
+      </div>
+    );
+  }
+
+  // 🔑 Se non c'è account → schermata Login / Register
+  if (!account) {
+    return (
+      <AuthScreen
+        onLoggedIn={(acc) => {
+          setAccount(acc);
+          saveAccountSession(acc);
+        }}
+      />
+    );
+  }
+
+  // ⏳ Finché stiamo provando a riprendere la partita
+  if (gameInitializing) {
+    return (
+      <div className="app">
+        <header className="header">
+          <h1>🌑 Lupus @ GSSI</h1>
+        </header>
+        <main className="card">
+          <p className="muted">Reconnecting to your last game…</p>
+        </main>
+      </div>
+    );
+  }
+
+  // 1) First screen: ask for the display name (di solito viene già dal login)
   if (!playerName) {
     return (
       <div className="app">
@@ -188,7 +408,7 @@ function App() {
     );
   }
 
-  // 2) If a game exists → show the Lobby / Night UI
+  // 2) If a game exists → show the Lobby / Night / Day UI
   if (currentGame && currentPlayerId) {
     return (
       <Lobby
@@ -196,6 +416,7 @@ function App() {
         currentPlayerId={currentPlayerId}
         game={currentGame}
         onLeaveGame={() => {
+          clearGameSession();
           setCurrentGame(null);
           setCurrentPlayerId(null);
         }}
@@ -267,7 +488,7 @@ function App() {
                 return;
               }
 
-              // 2) Insert host as first player
+              // 2) Insert host as first player (master, no role)
               const { data: player, error: playerError } = await supabase
                 .from("players")
                 .insert({
@@ -275,6 +496,7 @@ function App() {
                   name: playerName,
                   is_host: true,
                   alive: true,
+                  role: null,
                 })
                 .select()
                 .single();
@@ -289,6 +511,13 @@ function App() {
 
               // 3) Load full game
               const hydrated = await hydrateGame(game.id);
+
+              // Save session for rejoin
+              saveGameSession({
+                gameId: game.id,
+                playerId: player.id,
+                playerName,
+              });
 
               setCurrentGame(hydrated);
               setCurrentPlayerId(player.id);
@@ -314,6 +543,13 @@ function App() {
           <JoinGameForm
             playerName={playerName}
             onJoinedGame={(game, playerId) => {
+              // Save session for rejoin
+              saveGameSession({
+                gameId: game.id,
+                playerId,
+                playerName,
+              });
+
               setCurrentGame(game);
               setCurrentPlayerId(playerId);
             }}
@@ -368,6 +604,7 @@ function NameForm({ onConfirmName }) {
 }
 
 // Component: join game by code
+// Component: join game by code
 function JoinGameForm({ playerName, onJoinedGame }) {
   const [codeInput, setCodeInput] = useState("");
   const [error, setError] = useState("");
@@ -399,12 +636,38 @@ function JoinGameForm({ playerName, onJoinedGame }) {
         return;
       }
 
-      if (game.status !== "lobby") {
-        setError("This game is no longer in the lobby.");
+      // 2) Check if this name is already a player in that game
+      const { data: existingPlayers, error: existingError } = await supabase
+        .from("players")
+        .select("*")
+        .eq("game_id", game.id)
+        .eq("name", playerName)
+        .order("joined_at", { ascending: true });
+
+      if (existingError) {
+        console.error("Error checking existing player:", existingError);
+        setError("Something went wrong while checking your player.");
         return;
       }
 
-      // 2) Insert this player into the lobby
+      const existingPlayer = existingPlayers?.[0] || null;
+
+      if (existingPlayer) {
+        // ✅ Rejoin as this existing player (works even if game already started)
+        const hydrated = await hydrateGame(game.id);
+        onJoinedGame(hydrated, existingPlayer.id);
+        return;
+      }
+
+      // 3) If game already started and you're NOT a player, you can't join
+      if (game.status !== "lobby") {
+        setError(
+          "This game has already started and you are not part of it."
+        );
+        return;
+      }
+
+      // 4) Otherwise, it's lobby and you're a new player → insert as usual
       const { data: player, error: playerError } = await supabase
         .from("players")
         .insert({
@@ -422,9 +685,7 @@ function JoinGameForm({ playerName, onJoinedGame }) {
         return;
       }
 
-      // 3) Load full game
       const hydrated = await hydrateGame(game.id);
-
       onJoinedGame(hydrated, player.id);
     } catch (err) {
       console.error(err);
@@ -453,7 +714,7 @@ function JoinGameForm({ playerName, onJoinedGame }) {
   );
 }
 
-// Lobby + Night UI
+// Lobby + Night + Day UI
 function Lobby({
   game,
   playerName,
@@ -465,26 +726,33 @@ function Lobby({
   const isHost = game.hostName === playerName;
   const [isStarting, setIsStarting] = useState(false);
   const [resolvingNight, setResolvingNight] = useState(false);
+  const [resolvingDay, setResolvingDay] = useState(false);
   const [detectiveResult, setDetectiveResult] = useState("");
+  const [nightStatus, setNightStatus] = useState(null);
+  const [dayStatus, setDayStatus] = useState(null);
+  const [actionsLoading, setActionsLoading] = useState(false);
 
   const me = game.players.find((p) => p.id === currentPlayerId) || null;
 
-    const isNight =
+  const isNight =
     game.phase === "night_1" ||
     (game.phase && game.phase.toLowerCase().startsWith("night"));
 
   const isDay =
-    !isNight &&
-    game.phase &&
-    game.phase.toLowerCase().startsWith("day");
+    !isNight && game.phase && game.phase.toLowerCase().startsWith("day");
 
-  const alivePlayers = game.players.filter((p) => p.alive !== false);
+  // Alive players = only non-host
+  const alivePlayers = game.players.filter(
+    (p) => p.alive !== false && !p.isHost
+  );
+  const isDead = !!me && me.alive === false;
   const phaseLabel = (() => {
     if (game.phase === "lobby") return "Lobby";
     if (isNight) return `Night ${game.dayNumber || 1}`;
     if (isDay) return `Day ${game.dayNumber || 1}`;
     return game.phase || "Unknown phase";
   })();
+
   // Realtime subscription for players in this game
   useEffect(() => {
     let isCancelled = false;
@@ -496,8 +764,7 @@ function Lobby({
 
         onPlayersUpdated(players);
 
-        // If local game.phase is still "lobby" but some players already have a role,
-        // we infer that the host started the game and we are in night_1.
+        // If still lobby but roles now exist, assume host started game → night 1
         if (
           game.phase === "lobby" &&
           players.some((p) => p.role && p.role.length > 0)
@@ -541,6 +808,64 @@ function Lobby({
     };
   }, [game.id, game.phase, onPlayersUpdated, onGameUpdated]);
 
+    // Realtime subscription for game phase/status (night/day) for all clients
+  useEffect(() => {
+    let cancelled = false;
+
+    async function syncGame() {
+      try {
+        const g = await fetchGameById(game.id);
+        if (cancelled) return;
+        onGameUpdated({
+          id: g.id,
+          code: g.code,
+          hostName: g.hostName,
+          status: g.status,
+          phase: g.phase,
+          dayNumber: g.dayNumber,
+        });
+      } catch (err) {
+        console.error("Error syncing game:", err);
+      }
+    }
+
+    // Initial load of game data
+    syncGame();
+
+    const channel = supabase
+      .channel(`games-${game.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "games",
+          filter: `id=eq.${game.id}`,
+        },
+        (payload) => {
+          console.log("Realtime event for game:", payload);
+          const row = payload.new;
+          if (!row) return;
+          onGameUpdated({
+            id: row.id,
+            code: row.code,
+            hostName: row.host_name,
+            status: row.status,
+            phase: row.phase,
+            dayNumber: row.day_number,
+          });
+        }
+      )
+      .subscribe((status) => {
+        console.log("Realtime games channel status:", status);
+      });
+
+    return () => {
+      cancelled = true;
+      supabase.removeChannel(channel);
+    };
+  }, [game.id, onGameUpdated]);
+
   async function handleStartGame() {
     if (!isHost) return;
     if (isStarting) return;
@@ -555,11 +880,26 @@ function Lobby({
         return;
       }
 
-      const roles = buildRoles(players.length);
+      const hostPlayer = players.find((p) => p.isHost);
+      const nonHostPlayers = players.filter((p) => !p.isHost);
 
-      // Assign roles one by one
-      for (let i = 0; i < players.length; i++) {
-        const p = players[i];
+      if (!hostPlayer) {
+        alert("No host player found.");
+        setIsStarting(false);
+        return;
+      }
+
+      if (nonHostPlayers.length < 3) {
+        alert("You need at least 3 non-host players for roles.");
+        setIsStarting(false);
+        return;
+      }
+
+      const roles = buildRoles(nonHostPlayers.length);
+
+      // Assign roles only to non-host players
+      for (let i = 0; i < nonHostPlayers.length; i++) {
+        const p = nonHostPlayers[i];
         const role = roles[i];
 
         const { error } = await supabase
@@ -573,6 +913,19 @@ function Lobby({
           setIsStarting(false);
           return;
         }
+      }
+
+      // Ensure host is alive and has NO role
+      const { error: hostUpdateError } = await supabase
+        .from("players")
+        .update({ role: null, alive: true })
+        .eq("id", hostPlayer.id);
+
+      if (hostUpdateError) {
+        console.error("Error updating host player:", hostUpdateError);
+        alert("Roles assigned, but failed to update host.");
+        setIsStarting(false);
+        return;
       }
 
       // Update game phase to Night 1 (in DB)
@@ -594,7 +947,7 @@ function Lobby({
         console.log("Game started: night_1");
       }
 
-      // Aggiorna stato locale
+      // Local state
       onGameUpdated({
         status: "ongoing",
         phase: "night_1",
@@ -629,7 +982,7 @@ function Lobby({
         .eq("day_number", dayNumber);
 
       if (error) {
-        console.error("Error fetching actions:", error);
+        console.error("Error fetching night actions:", error);
         alert("Failed to fetch night actions.");
         setResolvingNight(false);
         return;
@@ -696,12 +1049,14 @@ function Lobby({
         alert("Night is over. No one was killed.");
       }
 
-      // Move to "day_1" (UI for daytime to be implemented later)
+      // Move to "day_1" (or current day)
+      const dayNumberToUse = game.dayNumber || 1;
+
       const { error: gameUpdateError } = await supabase
         .from("games")
         .update({
-          phase: "day_1",
-          day_number: dayNumber,
+          phase: `day_${dayNumberToUse}`,
+          day_number: dayNumberToUse,
         })
         .eq("id", game.id);
 
@@ -710,8 +1065,8 @@ function Lobby({
       }
 
       onGameUpdated({
-        phase: "day_1",
-        dayNumber: dayNumber,
+        phase: `day_${dayNumberToUse}`,
+        dayNumber: dayNumberToUse,
       });
     } catch (err) {
       console.error("Error resolving night:", err);
@@ -725,30 +1080,7 @@ function Lobby({
     }
   }
 
-  // Detective: local investigation (no DB, just uses roles already in memory)
-  function handleDetectiveInvestigation(targetId) {
-    const target = game.players.find((p) => p.id === targetId);
-    if (!target) {
-      setDetectiveResult("Could not find that player.");
-      return;
-    }
-    if (!target.role) {
-      setDetectiveResult(
-        `${target.name} does not have an assigned role yet.`
-      );
-      return;
-    }
-    if (target.role === "MAFIA") {
-      setDetectiveResult(
-        `You sense something suspicious about ${target.name}...`
-      );
-    } else {
-      setDetectiveResult(
-        `${target.name} seems innocent (or at least not Mafia).`
-      );
-    }
-  }
-    async function handleResolveDay() {
+  async function handleResolveDay() {
     if (!isHost) return;
     if (!isDay) return;
     if (resolvingDay) return;
@@ -866,6 +1198,55 @@ function Lobby({
     }
   }
 
+  // Detective: local investigation (no DB for result, just uses roles already in memory)
+  function handleDetectiveInvestigation(targetId) {
+    const target = game.players.find((p) => p.id === targetId);
+    if (!target) {
+      setDetectiveResult("Could not find that player.");
+      return;
+    }
+    if (!target.role) {
+      setDetectiveResult(
+        `${target.name} does not have an assigned role yet.`
+      );
+      return;
+    }
+    if (target.role === "MAFIA") {
+      setDetectiveResult(
+        `You sense something suspicious about ${target.name}...`
+      );
+    } else {
+      setDetectiveResult(
+        `${target.name} seems innocent (or at least not Mafia).`
+      );
+    }
+  }
+
+  async function refreshActionsStatus() {
+    if (!isHost) return;
+    setActionsLoading(true);
+    try {
+      const dayNumber = game.dayNumber || 1;
+      if (isNight) {
+        const status = await fetchNightActionStatus(game.id, dayNumber);
+        setNightStatus(status);
+        setDayStatus(null);
+      } else if (isDay) {
+        const status = await fetchDayVoteStatus(game.id, dayNumber);
+        setDayStatus(status);
+        setNightStatus(null);
+      } else {
+        setNightStatus(null);
+        setDayStatus(null);
+      }
+    } catch (err) {
+      console.error("Error refreshing actions status:", err);
+      alert("Failed to refresh master view.");
+    } finally {
+      setActionsLoading(false);
+    }
+  }
+
   return (
     <div className="app">
       <header className="header">
@@ -893,13 +1274,41 @@ function Lobby({
                 </span>
                 <div style={{ display: "flex", gap: "0.4rem" }}>
                   {p.isHost && <span className="badge">Host</span>}
-                  {/* Roles are secret: we do NOT show p.role here */}
+                  {/* Only the host (master) sees roles here */}
+                  {isHost && p.role && (
+                    <span className="badge">{p.role}</span>
+                  )}
                 </div>
               </li>
             ))}
           </ul>
         </section>
-
+        {/* Message for eliminated players (non-host) */}
+        {!isHost && isDead && (
+          <section
+            className="players"
+            style={{
+              marginTop: "1rem",
+              borderStyle: "solid",
+              borderColor: "#b91c1c",
+            }}
+          >
+            <h3>You have been eliminated</h3>
+            <p className="muted">
+              You are no longer part of the game. You can still follow the
+              discussion, but you cannot act anymore.
+            </p>
+            {me.role && (
+              <p style={{ marginTop: "0.5rem" }}>
+                You were:{" "}
+                <strong>
+                  {me.role}
+                </strong>
+              </p>
+            )}
+          </section>
+        )}
+        {/* Player-side role & actions (host has no role → non vede nulla di questo) */}
         {me && me.role && (
           <section
             className="players"
@@ -916,7 +1325,7 @@ function Lobby({
           </section>
         )}
 
-        {isNight && me && me.alive !== false && (
+        {isNight && me && me.alive !== false && me.role && (
           <section
             className="players"
             style={{ marginTop: "1rem", borderStyle: "dotted" }}
@@ -952,50 +1361,164 @@ function Lobby({
             )}
           </section>
         )}
-                {isDay && me && me.alive !== false && (
+
+        {isDay && me && me.alive !== false && me.role && (
           <section
             className="players"
             style={{ marginTop: "1rem", borderStyle: "dotted" }}
           >
             <h3>Day voting</h3>
-            <DayVotingActions
-              me={me}
-              game={game}
-              alivePlayers={alivePlayers}
-            />
+            <DayVotingActions me={me} game={game} alivePlayers={alivePlayers} />
           </section>
         )}
 
-              {isHost && (
-          <div style={{ marginTop: "1rem", display: "flex", gap: "0.75rem" }}>
-            {!me?.role && (
-              <button
-                className="btn primary"
-                onClick={handleStartGame}
-                disabled={isStarting}
+        {/* Host = master: sees master panel + control buttons, but never plays */}
+        {isHost && (
+          <>
+            <section
+              className="players"
+              style={{ marginTop: "1rem", borderStyle: "dotted" }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  gap: "0.5rem",
+                }}
               >
-                {isStarting ? "Starting..." : "Start game"}
-              </button>
-            )}
-            {me?.role && isNight && (
-              <button
-                className="btn primary"
-                onClick={handleResolveNight}
-                disabled={resolvingNight}
-              >
-                {resolvingNight ? "Resolving..." : "Resolve night"}
-              </button>
-            )}
-            {me?.role && isDay && (
-              <button
-                className="btn primary"
-                onClick={handleResolveDay}
-                disabled={resolvingDay}
-              >
-                {resolvingDay ? "Resolving..." : "Resolve day"}
-              </button>
-            )}
-          </div>
+                <h3>Master panel</h3>
+                <button
+                  type="button"
+                  className="btn ghost"
+                  style={{ padding: "0.35rem 0.8rem", fontSize: "0.8rem" }}
+                  onClick={refreshActionsStatus}
+                  disabled={actionsLoading}
+                >
+                  {actionsLoading ? "Refreshing..." : "Refresh actions"}
+                </button>
+              </div>
+
+              {isNight && (
+                <>
+                  <p className="tiny">
+                    Night overview: which special roles have submitted their
+                    actions.
+                  </p>
+                  <ul>
+                    {alivePlayers.map((p) => {
+                      const s = nightStatus?.[p.id] || {};
+                      return (
+                        <li key={p.id} className="player-item">
+                          <span>{p.name}</span>
+                          <div
+                            style={{
+                              display: "flex",
+                              gap: "0.4rem",
+                              fontSize: "0.8rem",
+                            }}
+                          >
+                            {p.role === "MAFIA" && (
+                              <span
+                                className="badge"
+                                style={{
+                                  opacity: s.mafiaKill ? 1 : 0.5,
+                                }}
+                              >
+                                Mafia action {s.mafiaKill ? "✓" : "…"}
+                              </span>
+                            )}
+                            {p.role === "DOCTOR" && (
+                              <span
+                                className="badge"
+                                style={{
+                                  opacity: s.doctorProtect ? 1 : 0.5,
+                                }}
+                              >
+                                Doctor action {s.doctorProtect ? "✓" : "…"}
+                              </span>
+                            )}
+                            {p.role === "DETECTIVE" && (
+                              <span
+                                className="badge"
+                                style={{
+                                  opacity: s.detectiveInvestigate ? 1 : 0.5,
+                                }}
+                              >
+                                Detective action{" "}
+                                {s.detectiveInvestigate ? "✓" : "…"}
+                              </span>
+                            )}
+                            {p.role === "CITIZEN" && (
+                              <span className="badge" style={{ opacity: 0.5 }}>
+                                Citizen
+                              </span>
+                            )}
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </>
+              )}
+
+              {isDay && (
+                <>
+                  <p className="tiny">
+                    Day overview: which players have already cast their vote.
+                  </p>
+                  <ul>
+                    {alivePlayers.map((p) => {
+                      const voted = !!dayStatus?.[p.id];
+                      return (
+                        <li key={p.id} className="player-item">
+                          <span>{p.name}</span>
+                          <span
+                            className="badge"
+                            style={{ opacity: voted ? 1 : 0.5 }}
+                          >
+                            {voted ? "Voted ✓" : "No vote yet"}
+                          </span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </>
+              )}
+            </section>
+
+            <div
+              style={{ marginTop: "1rem", display: "flex", gap: "0.75rem" }}
+            >
+              {game.phase === "lobby" && (
+                <button
+                  className="btn primary"
+                  onClick={handleStartGame}
+                  disabled={isStarting}
+                >
+                  {isStarting ? "Starting..." : "Start game"}
+                </button>
+              )}
+              {isNight && (
+                <button
+                  className="btn primary"
+                  onClick={handleResolveNight}
+                  disabled={resolvingNight}
+                >
+                  {resolvingNight ? "Resolving..." : "Resolve night"}
+                </button>
+              )}
+              {isDay && (
+                <button
+                  className="btn primary"
+                  onClick={handleResolveDay}
+                  disabled={resolvingDay}
+                >
+                  {resolvingDay ? "Resolving..." : "Resolve day"}
+                </button>
+              )}
+            </div>
+          </>
         )}
 
         <button className="btn ghost" onClick={onLeaveGame}>
@@ -1118,16 +1641,33 @@ function NightDetectiveActions({
   onInvestigate,
 }) {
   const [targetId, setTargetId] = useState("");
+  const [status, setStatus] = useState("");
 
-  function handleSubmit(e) {
+    const possibleTargets = alivePlayers.filter(
+    (p) => p.id !== me.id && !p.isHost
+  );
+
+  async function handleSubmit(e) {
     e.preventDefault();
     if (!targetId) {
+      setStatus("Select a target.");
       return;
     }
-    onInvestigate(targetId);
+    try {
+      await submitNightAction({
+        gameId: game.id,
+        playerId: me.id,
+        dayNumber: game.dayNumber || 1,
+        actionType: "DETECTIVE_INVESTIGATE",
+        targetPlayerId: targetId,
+      });
+      onInvestigate(targetId);
+      setStatus("Investigation submitted.");
+    } catch (err) {
+      console.error("Error submitting detective action:", err);
+      setStatus("Failed to submit investigation.");
+    }
   }
-
-  const possibleTargets = alivePlayers.filter((p) => p.id !== me.id);
 
   return (
     <form onSubmit={handleSubmit} className="form">
@@ -1149,6 +1689,11 @@ function NightDetectiveActions({
       <button type="submit" className="btn secondary">
         Investigate
       </button>
+      {status && (
+        <p className="tiny" style={{ marginTop: "0.5rem" }}>
+          {status}
+        </p>
+      )}
       {detectiveResult && (
         <p className="tiny" style={{ marginTop: "0.5rem" }}>
           {detectiveResult}
@@ -1157,6 +1702,7 @@ function NightDetectiveActions({
     </form>
   );
 }
+
 function DayVotingActions({ me, game, alivePlayers }) {
   const [targetId, setTargetId] = useState("");
   const [status, setStatus] = useState("");
@@ -1213,4 +1759,144 @@ function DayVotingActions({ me, game, alivePlayers }) {
     </form>
   );
 }
+function AuthScreen({ onLoggedIn }) {
+  const [mode, setMode] = useState("login"); // "login" | "register"
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    const u = username.trim();
+    const p = password.trim();
+
+    if (!u || !p) {
+      setError("Please enter both username and password.");
+      return;
+    }
+
+    setError("");
+    setLoading(true);
+
+    try {
+      if (mode === "register") {
+        const { data: existing, error: checkError } = await supabase
+          .from("accounts")
+          .select("id")
+          .eq("username", u)
+          .limit(1);
+
+        if (checkError) {
+          console.error("Error checking account:", checkError);
+          setError("Something went wrong. Please try again.");
+          return;
+        }
+
+        if (existing && existing.length > 0) {
+          setError("This username is already taken.");
+          return;
+        }
+
+        const { data: acc, error: insertError } = await supabase
+          .from("accounts")
+          .insert({
+            username: u,
+            password: p, // plaintext, ok per gioco interno
+          })
+          .select()
+          .single();
+
+        if (insertError) {
+          console.error("Error creating account:", insertError);
+          setError("Failed to create the account.");
+          return;
+        }
+
+        onLoggedIn({ id: acc.id, username: acc.username });
+        return;
+      } else {
+        const { data: rows, error: loginError } = await supabase
+          .from("accounts")
+          .select("*")
+          .eq("username", u)
+          .eq("password", p)
+          .limit(1);
+
+        if (loginError) {
+          console.error("Error logging in:", loginError);
+          setError("Something went wrong. Please try again.");
+          return;
+        }
+
+        const acc = rows?.[0];
+        if (!acc) {
+          setError("Invalid username or password.");
+          return;
+        }
+
+        onLoggedIn({ id: acc.id, username: acc.username });
+      }
+    } catch (err) {
+      console.error("Auth error:", err);
+      setError("Unexpected error. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="app">
+      <header className="header">
+        <h1>🌑 Lupus @ GSSI</h1>
+        <p>Account login</p>
+      </header>
+      <main className="card">
+        <div style={{ display: "flex", gap: "0.5rem", marginBottom: "1rem" }}>
+          <button
+            type="button"
+            className={`btn ${mode === "login" ? "primary" : "secondary"}`}
+            onClick={() => setMode("login")}
+          >
+            Login
+          </button>
+          <button
+            type="button"
+            className={`btn ${mode === "register" ? "primary" : "secondary"}`}
+            onClick={() => setMode("register")}
+          >
+            Register
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="form">
+          <input
+            className="input"
+            placeholder="Username"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+          />
+          <input
+            className="input"
+            placeholder="Password"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+          {error && <p className="error">{error}</p>}
+          <button type="submit" className="btn primary" disabled={loading}>
+            {loading
+              ? mode === "login"
+                ? "Logging in..."
+                : "Registering..."
+              : mode === "login"
+              ? "Login"
+              : "Register"}
+          </button>
+        </form>
+      </main>
+    </div>
+  );
+}
+
 export default App;
