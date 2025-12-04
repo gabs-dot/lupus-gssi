@@ -39,6 +39,7 @@ function saveGameSession({ gameId, playerId, playerName }) {
   }
 }
 
+
 function clearGameSession() {
   try {
     localStorage.removeItem(GAME_SESSION_KEY);
@@ -267,34 +268,22 @@ async function fetchDayVoteStatus(gameId, dayNumber) {
 ------------------------------------------------------- */
 
 function App() {
-  // 👤 Account
   const [account, setAccount] = useState(null);
   const [authInitializing, setAuthInitializing] = useState(true);
 
-  // 🧑‍🤝‍🧑 Game state
   const [playerName, setPlayerName] = useState("");
-  const [currentGame, setCurrentGame] = useState(null);
+  const [currentGame, setCurrentGame] = useState(null); // { id, code, hostName, status, phase, dayNumber, players: [] }
   const [currentPlayerId, setCurrentPlayerId] = useState(null);
   const [showJoin, setShowJoin] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
-  const [gameInitializing, setGameInitializing] = useState(true);
+  const [initializingGame, setInitializingGame] = useState(true);
 
-  // 🎲 Elenco partite associate all’account (come host o player)
-  const [gamesForAccount, setGamesForAccount] = useState([]);
-  const [gamesLoading, setGamesLoading] = useState(false);
+  // storico partite collegate all'account
+  const [myGames, setMyGames] = useState([]);
+  const [loadingGames, setLoadingGames] = useState(false);
+  const [gamesError, setGamesError] = useState("");
 
-  // 🔴 LOGOUT: pulisce tutto
-  function handleLogout() {
-    clearAccountSession();
-    clearGameSession();
-    setAccount(null);
-    setPlayerName("");
-    setCurrentGame(null);
-    setCurrentPlayerId(null);
-    setGamesForAccount([]);
-  }
-
-  /* ------------------- Restore ACCOUNT ------------------- */
+  // 🔁 Ripristina l'ACCOUNT da localStorage (login persistente)
   useEffect(() => {
     try {
       const raw = localStorage.getItem(ACCOUNT_SESSION_KEY);
@@ -319,20 +308,20 @@ function App() {
     }
   }, []);
 
-  /* ------------------- Restore GAME SESSION ------------------- */
+  // 🔁 Prova a riprendere una partita salvata (gameId + playerId)
   useEffect(() => {
     async function tryResumeGameSession() {
       try {
         const raw = localStorage.getItem(GAME_SESSION_KEY);
         if (!raw) {
-          setGameInitializing(false);
+          setInitializingGame(false);
           return;
         }
 
         const saved = JSON.parse(raw);
         if (!saved.gameId || !saved.playerId || !saved.playerName) {
           clearGameSession();
-          setGameInitializing(false);
+          setInitializingGame(false);
           return;
         }
 
@@ -340,99 +329,201 @@ function App() {
         const me = game.players.find((p) => p.id === saved.playerId);
         if (!me) {
           clearGameSession();
-          setGameInitializing(false);
+          setInitializingGame(false);
           return;
         }
 
-        setPlayerName(saved.playerName);
+        if (!playerName) {
+          setPlayerName(saved.playerName);
+        }
+
         setCurrentGame(game);
         setCurrentPlayerId(saved.playerId);
       } catch (err) {
         console.error("Error restoring game session", err);
         clearGameSession();
       } finally {
-        setGameInitializing(false);
+        setInitializingGame(false);
       }
     }
 
     tryResumeGameSession();
-  }, []);
+  }, [playerName]);
 
-  /* ------------------- Account → playerName ------------------- */
+  // 🔗 Collega l'account al playerName (username = nome nel gioco)
   useEffect(() => {
     if (account && !playerName) {
       setPlayerName(account.username);
     }
   }, [account, playerName]);
 
-  /* ------------------- Carica partite per account ------------------- */
-  useEffect(() => {
-    if (!account) {
-      setGamesForAccount([]);
-      return;
+  // Carica tutte le partite in cui compare il mio username nella tabella players
+  async function loadMyGames() {
+    if (!account) return;
+    setLoadingGames(true);
+    setGamesError("");
+
+    try {
+      // Tutti i player record con name = account.username
+      const { data: playerRows, error: playersError } = await supabase
+        .from("players")
+        .select("id, game_id, is_host")
+        .eq("name", account.username);
+
+      if (playersError) {
+        console.error("Error loading player list for history:", playersError);
+        setGamesError("Could not load your games.");
+        return;
+      }
+
+      if (!playerRows || playerRows.length === 0) {
+        setMyGames([]);
+        return;
+      }
+
+      const gameIds = [...new Set(playerRows.map((p) => p.game_id))];
+
+      const { data: games, error: gamesErrorRes } = await supabase
+        .from("games")
+        .select("*")
+        .in("id", gameIds);
+
+      if (gamesErrorRes) {
+        console.error("Error loading games for history:", gamesErrorRes);
+        setGamesError("Could not load your games.");
+        return;
+      }
+
+      const merged = games.map((g) => {
+        const pr = playerRows.find((p) => p.game_id === g.id);
+        return {
+          game: g,
+          playerId: pr?.id,
+          isHost: pr?.is_host || false,
+        };
+      });
+
+      // Ordina per id decrescente (o cambia come preferisci)
+      merged.sort((a, b) => (b.game.id || 0) - (a.game.id || 0));
+
+      setMyGames(merged);
+    } catch (err) {
+      console.error("Error in loadMyGames:", err);
+      setGamesError("Unexpected error while loading your games.");
+    } finally {
+      setLoadingGames(false);
     }
+  }
 
-    async function loadGames() {
-      setGamesLoading(true);
+  // Quando ho un account e NON sono dentro una partita, carico lo storico
+  useEffect(() => {
+    if (!account) return;
+    if (currentGame) return;
+    loadMyGames();
+  }, [account, currentGame]);
+
+  async function handleRejoinGameFromHome(gameId) {
+    const entry = myGames.find((g) => g.game.id === gameId);
+    if (!entry) return;
+
+    try {
+      const hydrated = await hydrateGame(gameId);
+
+      const me = hydrated.players.find((p) => p.id === entry.playerId);
+      if (!me) {
+        alert("You are no longer part of this game.");
+        await loadMyGames();
+        return;
+      }
+
+      // aggiorno sessione locale
+      saveGameSession({
+        gameId,
+        playerId: entry.playerId,
+        playerName: me.name,
+      });
+
+      setPlayerName(me.name);
+      setCurrentGame(hydrated);
+      setCurrentPlayerId(entry.playerId);
+    } catch (err) {
+      console.error("Error rejoining game:", err);
+      alert("Failed to rejoin this game.");
+    }
+  }
+
+  async function handleDeleteFromHistory(gameId, playerId, isHost) {
+    if (!account) return;
+
+    if (isHost) {
+      const confirmed = window.confirm(
+        "You are the host of this game. Deleting it will remove the game for everyone. Continue?"
+      );
+      if (!confirmed) return;
+
       try {
-        // Trova tutti i players con questo username
-        const { data: players, error: playersError } = await supabase
-          .from("players")
-          .select("id, game_id, is_host")
-          .eq("name", account.username);
+        await supabase.from("actions").delete().eq("game_id", gameId);
+        await supabase.from("players").delete().eq("game_id", gameId);
+        await supabase.from("games").delete().eq("id", gameId);
 
-        if (playersError) {
-          throw playersError;
+        // se questa era la partita salvata in sessione, pulisco
+        try {
+          const raw = localStorage.getItem(GAME_SESSION_KEY);
+          if (raw) {
+            const saved = JSON.parse(raw);
+            if (saved.gameId === gameId) {
+              clearGameSession();
+            }
+          }
+        } catch (e) {
+          console.error("Error clearing game session after delete:", e);
         }
 
-        if (!players || players.length === 0) {
-          setGamesForAccount([]);
-          return;
-        }
-
-        const gameIds = [...new Set(players.map((p) => p.game_id))];
-
-        const { data: games, error: gamesError } = await supabase
-          .from("games")
-          .select("*")
-          .in("id", gameIds);
-
-        if (gamesError) {
-          throw gamesError;
-        }
-
-        const gameMap = new Map(games.map((g) => [g.id, g]));
-        const list = players
-          .map((p) => {
-            const g = gameMap.get(p.game_id);
-            if (!g) return null;
-            if (g.status === "ended") return null; // opzionale: nascondi partite concluse
-            return {
-              gameId: g.id,
-              playerId: p.id,
-              code: g.code,
-              status: g.status,
-              phase: g.phase,
-              dayNumber: g.day_number,
-              isHost: p.is_host,
-            };
-          })
-          .filter(Boolean);
-
-        setGamesForAccount(list);
+        setMyGames((prev) => prev.filter((g) => g.game.id !== gameId));
       } catch (err) {
-        console.error("Error loading games for account", err);
-        setGamesForAccount([]);
-      } finally {
-        setGamesLoading(false);
+        console.error("Error deleting game:", err);
+        alert("Failed to delete this game.");
+      }
+    } else {
+      const confirmed = window.confirm(
+        "Remove this game from your history and leave it? You will no longer be a player in this game."
+      );
+      if (!confirmed) return;
+
+      try {
+        await supabase.from("players").delete().eq("id", playerId);
+
+        try {
+          const raw = localStorage.getItem(GAME_SESSION_KEY);
+          if (raw) {
+            const saved = JSON.parse(raw);
+            if (saved.gameId === gameId && saved.playerId === playerId) {
+              clearGameSession();
+            }
+          }
+        } catch (e) {
+          console.error("Error clearing session after leaving game:", e);
+        }
+
+        setMyGames((prev) => prev.filter((g) => g.game.id !== gameId));
+      } catch (err) {
+        console.error("Error removing game from history:", err);
+        alert("Failed to remove this game.");
       }
     }
+  }
 
-    loadGames();
-  }, [account]);
+  function handleLogout() {
+    clearAccountSession();
+    clearGameSession();
+    setAccount(null);
+    setPlayerName("");
+    setCurrentGame(null);
+    setCurrentPlayerId(null);
+    setMyGames([]);
+  }
 
-  /* ------------------- Schermate di loading / auth ------------------- */
-
+  // ⏳ Finché stiamo controllando l'account
   if (authInitializing) {
     return (
       <div className="app">
@@ -446,6 +537,7 @@ function App() {
     );
   }
 
+  // 🔑 Se non c'è account → schermata Login / Register
   if (!account) {
     return (
       <AuthScreen
@@ -457,7 +549,8 @@ function App() {
     );
   }
 
-  if (gameInitializing && !currentGame) {
+  // Finché stiamo provando a riprendere la partita
+  if (initializingGame) {
     return (
       <div className="app">
         <header className="header">
@@ -470,16 +563,13 @@ function App() {
     );
   }
 
-  /* ------------------- Lobby / Game in corso ------------------- */
-
+  // Se sono già dentro un game → mostra Lobby
   if (currentGame && currentPlayerId) {
     return (
       <Lobby
-        account={account}
         playerName={playerName}
         currentPlayerId={currentPlayerId}
         game={currentGame}
-        onLogout={handleLogout}
         onLeaveGame={() => {
           clearGameSession();
           setCurrentGame(null);
@@ -509,88 +599,30 @@ function App() {
     );
   }
 
-  /* ------------------- Home (no game attivo nel client) ------------------- */
-
+  // 3) Home dopo login (ma non dentro una partita)
   return (
     <div className="app">
       <header className="header">
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            width: "100%",
-          }}
-        >
-          <div>
-            <h1>🌑 Lupus @ GSSI</h1>
-            <p>Welcome, {playerName || account.username}.</p>
-          </div>
-          <div style={{ textAlign: "right" }}>
-            <p className="tiny">Logged in as {account.username}</p>
-            <button className="btn ghost" onClick={handleLogout}>
-              Log out
-            </button>
-          </div>
+        <h1>🌑 Lupus @ GSSI</h1>
+        <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
+          <p style={{ margin: 0 }}>Welcome, {account.username}.</p>
+          <button
+            type="button"
+            className="btn ghost"
+            onClick={handleLogout}
+            style={{ padding: "0.25rem 0.6rem", fontSize: "0.8rem" }}
+          >
+            Log out
+          </button>
         </div>
       </header>
 
       <main className="card">
         <h2>Create or join a game</h2>
         <p className="muted">
-          You can create a new game and share the code, join an existing one,
-          or re-enter one of your active games.
+          You can create a new game and share the code, or join an existing one
+          using a code.
         </p>
-
-        {/* Lista partite dell'account */}
-        {gamesLoading && (
-          <p className="tiny" style={{ marginBottom: "1rem" }}>
-            Loading your games…
-          </p>
-        )}
-
-        {!gamesLoading && gamesForAccount.length > 0 && (
-          <section
-            className="players"
-            style={{ marginBottom: "1.25rem", borderStyle: "dashed" }}
-          >
-            <h3>Your games</h3>
-            <ul>
-              {gamesForAccount.map((g) => (
-                <li key={`${g.gameId}-${g.playerId}`} className="player-item">
-                  <div>
-                    <strong>Code: {g.code}</strong>
-                    <div className="tiny">
-                      {g.isHost ? "Host / master" : "Player"} –{" "}
-                      {g.status || "unknown"} – {g.phase || "no phase"}{" "}
-                      {g.dayNumber ? `(Day ${g.dayNumber})` : ""}
-                    </div>
-                  </div>
-                  <button
-                    className="btn secondary"
-                    onClick={async () => {
-                      try {
-                        const fullGame = await hydrateGame(g.gameId);
-                        saveGameSession({
-                          gameId: g.gameId,
-                          playerId: g.playerId,
-                          playerName: playerName || account.username,
-                        });
-                        setCurrentGame(fullGame);
-                        setCurrentPlayerId(g.playerId);
-                      } catch (err) {
-                        console.error("Error rejoining game from list", err);
-                        alert("Could not rejoin that game.");
-                      }
-                    }}
-                  >
-                    Enter
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
 
         <button
           className="btn primary"
@@ -606,7 +638,7 @@ function App() {
                 .from("games")
                 .insert({
                   code,
-                  host_name: playerName || account.username,
+                  host_name: account.username,
                   status: "lobby",
                   phase: "lobby",
                   day_number: 0,
@@ -620,12 +652,11 @@ function App() {
                 return;
               }
 
-              // Host / master (no role)
               const { data: player, error: playerError } = await supabase
                 .from("players")
                 .insert({
                   game_id: game.id,
-                  name: playerName || account.username,
+                  name: account.username,
                   is_host: true,
                   alive: true,
                   role: null,
@@ -646,9 +677,10 @@ function App() {
               saveGameSession({
                 gameId: game.id,
                 playerId: player.id,
-                playerName: playerName || account.username,
+                playerName: account.username,
               });
 
+              setPlayerName(account.username);
               setCurrentGame(hydrated);
               setCurrentPlayerId(player.id);
             } catch (err) {
@@ -664,22 +696,22 @@ function App() {
 
         <button
           className="btn secondary"
-          style={{ marginTop: "0.75rem" }}
           onClick={() => setShowJoin((prev) => !prev)}
         >
-          {showJoin ? "Hide join form" : "Join a game by code"}
+          {showJoin ? "Hide join form" : "Join a game"}
         </button>
 
         {showJoin && (
           <JoinGameForm
-            playerName={playerName || account.username}
+            playerName={account.username}
             onJoinedGame={(game, playerId) => {
               saveGameSession({
                 gameId: game.id,
                 playerId,
-                playerName: playerName || account.username,
+                playerName: account.username,
               });
 
+              setPlayerName(account.username);
               setCurrentGame(game);
               setCurrentPlayerId(playerId);
             }}
@@ -690,10 +722,85 @@ function App() {
           With realtime enabled, players will appear in the lobby as they join
           from their own devices.
         </p>
+
+        <hr style={{ margin: "1.5rem 0", opacity: 0.2 }} />
+
+        <h3>Your games</h3>
+        {gamesError && <p className="error">{gamesError}</p>}
+
+        {loadingGames ? (
+          <p className="muted">Loading your games…</p>
+        ) : myGames.length === 0 ? (
+          <p className="tiny">You have no games in your history yet.</p>
+        ) : (
+          <section className="players" style={{ marginTop: "0.5rem" }}>
+            <ul>
+              {myGames.map(({ game, playerId, isHost }) => (
+                <li
+                  key={game.id}
+                  className="player-item"
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    gap: "0.75rem",
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <div>
+                    <div>
+                      <strong>{game.code}</strong>{" "}
+                      <span className="tiny">
+                        {isHost ? "(host)" : "(player)"}
+                      </span>
+                    </div>
+                    <div className="tiny">
+                      Status: {game.status || "unknown"} – Phase:{" "}
+                      {game.phase || "-"}
+                    </div>
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: "0.5rem",
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    {game.status !== "ended" && (
+                      <button
+                        type="button"
+                        className="btn secondary"
+                        onClick={() =>
+                          handleRejoinGameFromHome(game.id)
+                        }
+                      >
+                        Rejoin
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="btn ghost"
+                      onClick={() =>
+                        handleDeleteFromHistory(
+                          game.id,
+                          playerId,
+                          isHost
+                        )
+                      }
+                    >
+                      Delete from history
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
       </main>
     </div>
   );
 }
+
 
 /* -------------------------------------------------------
    Name form
