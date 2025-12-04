@@ -310,50 +310,66 @@ function App() {
 
   // 🔁 Prova a riprendere una partita salvata (gameId + playerId)
   useEffect(() => {
-    async function tryResumeGameSession() {
-      try {
-        const raw = localStorage.getItem(GAME_SESSION_KEY);
-        if (!raw) {
-          setInitializingGame(false);
-          return;
-        }
-
-        const saved = JSON.parse(raw);
-        if (!saved.gameId || !saved.playerId || !saved.playerName) {
-          clearGameSession();
-          setInitializingGame(false);
-          return;
-        }
-
-        const game = await hydrateGame(saved.gameId);
-        const me = game.players.find((p) => p.id === saved.playerId);
-        if (!me) {
-          clearGameSession();
-          setInitializingGame(false);
-          return;
-        }
-
-        if (!playerName) {
-          setPlayerName(saved.playerName);
-        }
-
-        setCurrentGame(game);
-        setCurrentPlayerId(saved.playerId);
-      } catch (err) {
-        console.error("Error restoring game session", err);
-        clearGameSession();
-      } finally {
+  async function tryResumeGameSession() {
+    try {
+      const raw = localStorage.getItem(GAME_SESSION_KEY);
+      if (!raw) {
         setInitializingGame(false);
+        return;
       }
-    }
 
-    tryResumeGameSession();
-  }, [playerName]);
+      const saved = JSON.parse(raw);
+      if (!saved.gameId || !saved.playerId || !saved.playerName) {
+        clearGameSession();
+        setInitializingGame(false);
+        return;
+      }
+
+      // Se il game è stato cancellato su Supabase, questa chiamata può fallire
+      let game;
+      try {
+        game = await hydrateGame(saved.gameId);
+      } catch (e) {
+        console.error("hydrateGame failed, clearing session", e);
+        clearGameSession();
+        setInitializingGame(false);
+        return;
+      }
+
+      if (!game) {
+        clearGameSession();
+        setInitializingGame(false);
+        return;
+      }
+
+      const me = game.players.find((p) => p.id === saved.playerId);
+      if (!me) {
+        clearGameSession();
+        setInitializingGame(false);
+        return;
+      }
+
+      if (!playerName) {
+        setPlayerName(saved.playerName);
+      }
+
+      setCurrentGame(game);
+      setCurrentPlayerId(saved.playerId);
+    } catch (err) {
+      console.error("Error restoring game session", err);
+      clearGameSession();
+    } finally {
+      setInitializingGame(false);
+    }
+  }
+
+  tryResumeGameSession();
+}, [playerName]);
 
   // 🔗 Collega l'account al playerName (username = nome nel gioco)
   useEffect(() => {
     if (account && !playerName) {
-      setPlayerName(account.username);
+      setPlayerName(account?.username);
     }
   }, [account, playerName]);
 
@@ -364,11 +380,11 @@ function App() {
     setGamesError("");
 
     try {
-      // Tutti i player record con name = account.username
+      // Tutti i player record con name = account?.username
       const { data: playerRows, error: playersError } = await supabase
         .from("players")
         .select("id, game_id, is_host")
-        .eq("name", account.username);
+        .eq("name", account?.username);
 
       if (playersError) {
         console.error("Error loading player list for history:", playersError);
@@ -605,7 +621,7 @@ function App() {
       <header className="header">
         <h1>🌑 Lupus @ GSSI</h1>
         <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
-          <p style={{ margin: 0 }}>Welcome, {account.username}.</p>
+          <p style={{ margin: 0 }}>Welcome, {account?.username}.</p>
           <button
             type="button"
             className="btn ghost"
@@ -638,7 +654,7 @@ function App() {
                 .from("games")
                 .insert({
                   code,
-                  host_name: account.username,
+                  host_name: account?.username,
                   status: "lobby",
                   phase: "lobby",
                   day_number: 0,
@@ -656,7 +672,7 @@ function App() {
                 .from("players")
                 .insert({
                   game_id: game.id,
-                  name: account.username,
+                  name: account?.username,
                   is_host: true,
                   alive: true,
                   role: null,
@@ -677,10 +693,10 @@ function App() {
               saveGameSession({
                 gameId: game.id,
                 playerId: player.id,
-                playerName: account.username,
+                playerName: account?.username,
               });
 
-              setPlayerName(account.username);
+              setPlayerName(account?.username);
               setCurrentGame(hydrated);
               setCurrentPlayerId(player.id);
             } catch (err) {
@@ -703,15 +719,15 @@ function App() {
 
         {showJoin && (
           <JoinGameForm
-            playerName={account.username}
+            playerName={account?.username}
             onJoinedGame={(game, playerId) => {
               saveGameSession({
                 gameId: game.id,
                 playerId,
-                playerName: account.username,
+                playerName: account?.username,
               });
 
-              setPlayerName(account.username);
+              setPlayerName(account?.username);
               setCurrentGame(game);
               setCurrentPlayerId(playerId);
             }}
@@ -990,7 +1006,7 @@ function Lobby({
   onPlayersUpdated,
   onGameUpdated,
 }) {
-  const isHost = game.hostName === playerName || game.hostName === account.username;
+  const isHost = game.hostName === playerName;
   const [isStarting, setIsStarting] = useState(false);
   const [resolvingNight, setResolvingNight] = useState(false);
   const [resolvingDay, setResolvingDay] = useState(false);
@@ -1599,7 +1615,7 @@ function Lobby({
           </div>
           {account && (
             <div style={{ textAlign: "right" }}>
-              <p className="tiny">Logged in as {account.username}</p>
+              <p className="tiny">Logged in as {account?.username}</p>
               <button className="btn ghost" onClick={onLogout}>
                 Log out
               </button>
