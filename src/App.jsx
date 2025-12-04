@@ -272,6 +272,16 @@ function App() {
   const [isBusy, setIsBusy] = useState(false);
   const [gameInitializing, setGameInitializing] = useState(true);
 
+  // 🔴 LOGOUT: pulisce tutto
+  function handleLogout() {
+    clearAccountSession();
+    clearGameSession();
+    setAccount(null);
+    setPlayerName("");
+    setCurrentGame(null);
+    setCurrentPlayerId(null);
+  }
+
   // 🔁 Restore account from localStorage
   useEffect(() => {
     try {
@@ -391,10 +401,26 @@ function App() {
     return (
       <div className="app">
         <header className="header">
-          <h1>🌑 Lupus @ GSSI</h1>
-          <p>Social deduction game for the GSSI community</p>
-        </header>
-
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            width: "100%",
+          }}
+        >
+          <div>
+            <h1>🌑 Lupus @ GSSI</h1>
+            <p>Social deduction game for the GSSI community</p>
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <p className="tiny">Logged in as {account.username}</p>
+            <button className="btn ghost" onClick={handleLogout}>
+              Log out
+            </button>
+          </div>
+        </div>
+      </header>
         <main className="card">
           <h2>What should we call you?</h2>
           <p className="muted">
@@ -408,46 +434,65 @@ function App() {
 
   // If already in a game → show lobby/game UI
   if (currentGame && currentPlayerId) {
-    return (
-      <Lobby
-        playerName={playerName}
-        currentPlayerId={currentPlayerId}
-        game={currentGame}
-        onLeaveGame={() => {
-          clearGameSession();
-          setCurrentGame(null);
-          setCurrentPlayerId(null);
-        }}
-        onPlayersUpdated={(players) =>
-          setCurrentGame((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  players,
-                }
-              : prev
-          )
-        }
-        onGameUpdated={(partial) =>
-          setCurrentGame((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  ...partial,
-                }
-              : prev
-          )
-        }
-      />
-    );
-  }
+  return (
+    <Lobby
+      playerName={playerName}
+      currentPlayerId={currentPlayerId}
+      game={currentGame}
+      account={account}
+      onLogout={handleLogout}
+      onLeaveGame={() => {
+        clearGameSession();
+        setCurrentGame(null);
+        setCurrentPlayerId(null);
+      }}
+      onPlayersUpdated={(players) =>
+        setCurrentGame((prev) =>
+          prev
+            ? {
+                ...prev,
+                players,
+              }
+            : prev
+        )
+      }
+      onGameUpdated={(partial) =>
+        setCurrentGame((prev) =>
+          prev
+            ? {
+                ...prev,
+                ...partial,
+              }
+            : prev
+        )
+      }
+    />
+  );
+}
 
   // Home after entering the name
   return (
     <div className="app">
       <header className="header">
-        <h1>🌑 Lupus @ GSSI</h1>
-        <p>Welcome, {playerName}.</p>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            width: "100%",
+          }}
+        >
+          <div>
+            <h1>🌑 Lupus @ GSSI</h1>
+            <p>Social deduction game for the GSSI community</p>
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <p className="tiny">Logged in as {account.username}</p>
+            <button className="btn ghost" onClick={handleLogout}>
+              Log out
+            </button>
+          </div>
+        </div>
       </header>
 
       <main className="card">
@@ -708,10 +753,12 @@ function Lobby({
   game,
   playerName,
   currentPlayerId,
+  account,
+  onLogout,
   onLeaveGame,
   onPlayersUpdated,
   onGameUpdated,
-}) {
+})  {
   const isHost = game.hostName === playerName;
   const [isStarting, setIsStarting] = useState(false);
   const [resolvingNight, setResolvingNight] = useState(false);
@@ -1226,12 +1273,31 @@ function Lobby({
 
   return (
     <div className="app">
-      <header className="header">
-        <h1>🌑 Lupus @ GSSI</h1>
-        <p>{phaseLabel}</p>
-        <div className="game-code">{game.code}</div>
+      
+<header className="header">
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            width: "100%",
+          }}
+        >
+          <div>
+            <h1>🌑 Lupus @ GSSI</h1>
+            <p>{phaseLabel}</p>
+            <div className="game-code">{game.code}</div>
+          </div>
+          {account && (
+            <div style={{ textAlign: "right" }}>
+              <p className="tiny">Logged in as {account.username}</p>
+              <button className="btn ghost" onClick={onLogout}>
+                Log out
+              </button>
+            </div>
+          )}
+        </div>
       </header>
-
       <main className="card">
         <h2>Game lobby</h2>
         <p className="muted">
